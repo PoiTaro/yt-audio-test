@@ -1,0 +1,18 @@
+{
+  "name": "youtube-audio-stream-probe",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A diagnostic CLI for testing public YouTube audio-only stream resolution without yt-dlp.",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "probe": "node src/cli.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "youtubei.js": "18.0.0"
+  }
+}
