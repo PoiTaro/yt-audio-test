@@ -1,6 +1,7 @@
 import { ClientType, Constants, Innertube, UniversalCache } from '/youtubei.js';
 
 const statusNode = document.querySelector('#status');
+const nativeMode = new URL(location.href).searchParams.get('transport') === 'native';
 
 function update(value) {
   statusNode.textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
@@ -62,8 +63,9 @@ async function report(result) {
 }
 
 async function run() {
-  await waitForBridge();
-  update('extension detected; resolving through browser-side InnerTube...');
+  if (!nativeMode) await waitForBridge();
+  const transportFetch = nativeMode ? globalThis.fetch.bind(globalThis) : bridgeFetch;
+  update(`${nativeMode ? 'native browser fetch' : 'extension'}; resolving through browser-side InnerTube...`);
   const clients = [
     ['WEB', ClientType.WEB],
     ['MWEB', ClientType.MWEB],
@@ -88,7 +90,7 @@ async function run() {
         client_type: clientType,
         generate_session_locally: name !== 'WEB',
         enable_session_cache: false,
-        fetch: bridgeFetch,
+        fetch: transportFetch,
       });
       const candidateInfo = await candidate.getBasicInfo('jNQXAC9IVRw');
       const status = candidateInfo.playability_status?.status ?? null;
@@ -109,15 +111,16 @@ async function run() {
   if (!info) throw new Error(JSON.stringify(failures));
   const playability = info.playability_status?.status ?? null;
 
-  update('audio URL resolved; fetching first 8 KiB through extension...');
-  const response = await window.proxyFetch(streamUrl, {
+  update(`audio URL resolved; fetching first 8 KiB through ${nativeMode ? 'native browser fetch' : 'extension'}...`);
+  const response = await transportFetch(streamUrl, {
     method: 'GET',
     headers: { ...Constants.STREAM_HEADERS, range: 'bytes=0-8191' },
   });
   const data = await response.arrayBuffer();
   await report({
     success: response.ok && data.byteLength > 0,
-    extensionDetected: true,
+    transport: nativeMode ? 'native' : 'extension',
+    extensionDetected: !nativeMode,
     browserResolved: true,
     client,
     playability,
@@ -131,6 +134,7 @@ async function run() {
 
 run().catch((error) => report({
   success: false,
+  transport: nativeMode ? 'native' : 'extension',
   extensionDetected: Boolean(window.ytcBridge?.installed),
   browserResolved: false,
   error: error.message,

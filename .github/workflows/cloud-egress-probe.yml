@@ -25,10 +25,15 @@ jobs:
       - name: Probe YouTube audio path
         continue-on-error: true
         run: npm run probe -- M7lc1UVf-VE --clients ANDROID_VR,IOS --seconds 3 --output output
+      - name: Probe watch-page HTML path
+        continue-on-error: true
+        run: npm run probe:html -- jNQXAC9IVRw output-html
       - name: Upload diagnostic report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: probe-${{ runner.os }}
-          path: output/*.json
+          path: |
+            output/*.json
+            output-html/*.json
           if-no-files-found: warn
