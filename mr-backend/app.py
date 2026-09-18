@@ -67,6 +67,12 @@ MAX_CONCURRENT_JOBS = _integer_setting("MAX_CONCURRENT_JOBS", 1, 1, 4)
 RATE_LIMIT_REQUESTS = _integer_setting("RATE_LIMIT_REQUESTS", 5, 1, 100)
 RATE_LIMIT_WINDOW_SECONDS = _integer_setting("RATE_LIMIT_WINDOW_SECONDS", 60 * 60, 60, 24 * 60 * 60)
 CLEANUP_INTERVAL_SECONDS = _integer_setting("CLEANUP_INTERVAL_SECONDS", 60, 15, 10 * 60)
+LOW_MEMORY_MODE = os.environ.get("LOW_MEMORY_MODE", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 YOUTUBE_HOSTS = {"youtube.com", "youtu.be", "youtube-nocookie.com"}
 FRONTEND_ORIGINS = {
     origin.strip().rstrip("/")
@@ -547,6 +553,71 @@ def align_audio(
     tuple[np.ndarray, np.ndarray, np.ndarray] | None,
 ]:
     """区間別DTWを優先し、失敗時は従来の一定オフセットで音源を揃える。"""
+    if LOW_MEMORY_MODE:
+        # Render Free (512 MB) ではlibrosa/Numbaの初回JITコンパイルが
+        # メモリ上限に達するため、WAV読込と全体位置合わせをSciPyだけで行う。
+        original, original_sr = sf.read(original_file, dtype="float32", always_2d=False)
+        karaoke, karaoke_sr = sf.read(karaoke_file, dtype="float32", always_2d=False)
+        if original.ndim > 1:
+            original = np.mean(original, axis=1, dtype=np.float32)
+        if karaoke.ndim > 1:
+            karaoke = np.mean(karaoke, axis=1, dtype=np.float32)
+        if original_sr != SAMPLE_RATE:
+            divisor = __import__("math").gcd(original_sr, SAMPLE_RATE)
+            original = sps.resample_poly(
+                original,
+                SAMPLE_RATE // divisor,
+                original_sr // divisor,
+            ).astype(np.float32, copy=False)
+        if karaoke_sr != SAMPLE_RATE:
+            divisor = __import__("math").gcd(karaoke_sr, SAMPLE_RATE)
+            karaoke = sps.resample_poly(
+                karaoke,
+                SAMPLE_RATE // divisor,
+                karaoke_sr // divisor,
+            ).astype(np.float32, copy=False)
+        if not len(original) or not len(karaoke):
+            raise ValueError("空の音声ファイルは処理できません。")
+
+        original = _normalise(original).astype(np.float32, copy=False)
+        karaoke = _normalise(karaoke).astype(np.float32, copy=False)
+        analysis_sr = 2_000
+        divisor = __import__("math").gcd(SAMPLE_RATE, analysis_sr)
+        original_small = sps.resample_poly(
+            original,
+            analysis_sr // divisor,
+            SAMPLE_RATE // divisor,
+        )
+        karaoke_small = sps.resample_poly(
+            karaoke,
+            analysis_sr // divisor,
+            SAMPLE_RATE // divisor,
+        )
+        max_lag = min(
+            30 * analysis_sr,
+            max(len(original_small), len(karaoke_small)) - 1,
+        )
+        correlation = sps.correlate(
+            original_small,
+            karaoke_small,
+            mode="full",
+            method="fft",
+        )
+        lags = sps.correlation_lags(
+            len(original_small), len(karaoke_small), mode="full"
+        )
+        usable = np.abs(lags) <= max_lag
+        lag_small = int(lags[usable][np.argmax(correlation[usable])])
+        lag = int(round(lag_small * SAMPLE_RATE / analysis_sr))
+        if lag > 0:
+            original = original[lag:]
+        elif lag < 0:
+            karaoke = karaoke[-lag:]
+        length = min(len(original), len(karaoke))
+        if length < 2_048:
+            raise ValueError("位置合わせ後の音声が短すぎます。")
+        return original[:length], karaoke[:length], SAMPLE_RATE, lag / SAMPLE_RATE, None
+
     original, sr = librosa.load(original_file, sr=SAMPLE_RATE, mono=True)
     karaoke, _ = librosa.load(karaoke_file, sr=SAMPLE_RATE, mono=True)
     if not len(original) or not len(karaoke):
