@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { buildSummary, classifyError, createResolver, extractVideoId, probeClient } from './core.js';
+import { createWebPoMinter } from './pot.js';
 
 const port = Number(process.env.PORT || 10000);
 const clients = (process.env.TEST_CLIENTS || 'ANDROID_VR,IOS,WEB,MWEB,ANDROID,TV,TV_SIMPLY,TV_EMBEDDED,WEB_EMBEDDED,VISIONOS,YTMUSIC,YTMUSIC_ANDROID,YTKIDS,WEB_CREATOR,YTSTUDIO_ANDROID')
@@ -16,6 +17,7 @@ const inputs = (process.env.TEST_VIDEO_IDS || 'M7lc1UVf-VE,aqz-KE-bpKQ,jNQXAC9IV
 const outputDirectory = path.join(os.tmpdir(), 'youtube-audio-stream-probe');
 const sessionMode = process.env.SESSION_MODE || 'dedicated';
 const generateSessionLocally = process.env.GENERATE_SESSION_LOCALLY === 'true';
+const poTokenMode = process.env.PO_TOKEN_MODE || 'none';
 
 const state = {
   status: 'starting',
@@ -36,7 +38,8 @@ const state = {
     seconds: 10,
     cookie: false,
     login: false,
-    poToken: false,
+    poToken: poTokenMode === 'webpo',
+    poTokenMode,
     sessionMode,
     generateSessionLocally,
   },
@@ -72,7 +75,7 @@ function htmlResponse(response) {
 <style>body{font-family:system-ui,sans-serif;max-width:760px;margin:48px auto;padding:0 20px;line-height:1.65}code{background:#eee;padding:.2em .4em;border-radius:4px}.ok{color:#087f23}.run{color:#9a6700}.ng{color:#c62828}</style></head>
 <body><h1>YouTube Audio Stream Probe</h1>
 <p>Status: <strong class="${state.status === 'complete' ? 'ok' : state.status === 'error' ? 'ng' : 'run'}">${state.status}</strong></p>
-<p>RenderのデータセンターIPから、固定3動画を複数のInnerTubeクライアントで検証します。Cookie・ログイン・PO Token・yt-dlpは使用しません。</p>
+<p>RenderのデータセンターIPから、固定動画を複数のInnerTubeクライアントで検証します。Cookie・ログイン・yt-dlpは使用しません。PO Token: <code>${poTokenMode}</code></p>
 <ul><li><a href="/health">/health</a></li><li><a href="/report">/report</a></li></ul>
 </body></html>`;
   response.writeHead(200, {
@@ -103,6 +106,7 @@ async function runValidation() {
   state.status = 'running';
   console.log(`Starting ${state.progress.totalAttempts} Render validation attempts`);
   try {
+    const poMinter = poTokenMode === 'webpo' ? await createWebPoMinter() : null;
     let sharedYoutube = null;
     const dedicatedSessions = new Map();
     if (sessionMode === 'override') {
@@ -113,6 +117,7 @@ async function runValidation() {
     }
     for (const input of inputs) {
       const videoId = extractVideoId(input);
+      const poToken = poMinter ? await poMinter.mintAsWebsafeString(videoId) : null;
       const entry = { input, videoId, attempts: [] };
       for (const client of clients) {
         let attempt;
@@ -135,6 +140,7 @@ async function runValidation() {
             outputDirectory,
             seconds: 10,
             requestClientOverride: sessionMode !== 'dedicated',
+            poToken,
             log: (message) => console.log(`[${videoId}][${client}] ${message}`),
           });
         } catch (error) {

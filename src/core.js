@@ -355,6 +355,7 @@ export async function probeClient({
   skipHttp = false,
   skipFfmpeg = false,
   requestClientOverride = true,
+  poToken = null,
   log = () => {},
 }) {
   const result = {
@@ -372,6 +373,7 @@ export async function probeClient({
     streamExpiry: null,
     http: null,
     ffmpeg: null,
+    poTokenUsed: Boolean(poToken),
     error: null,
   };
 
@@ -410,8 +412,13 @@ export async function probeClient({
     result.selectedFormat = describeFormat(selected);
     log(`選択: itag ${selected.itag}, ${result.selectedFormat.codec ?? result.selectedFormat.mime}, ${selected.bitrate ?? '?'} bps`);
 
-    const streamUrl = await selected.decipher(youtube.session.player);
+    let streamUrl = await selected.decipher(youtube.session.player);
     if (!streamUrl) throw new ProbeError('NO_URL', 'formatのストリームURLを解決できませんでした。');
+    if (poToken) {
+      const tokenizedUrl = new URL(streamUrl);
+      tokenizedUrl.searchParams.set('pot', poToken);
+      streamUrl = tokenizedUrl.toString();
+    }
     result.streamUrl = streamUrl;
     result.streamUrlSuccess = true;
     result.streamExpiry = inspectExpiry(streamUrl);
