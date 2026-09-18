@@ -38,3 +38,26 @@ npm run probe -- M7lc1UVf-VE aqz-KE-bpKQ jNQXAC9IVRw --clients ANDROID_VR,IOS --
 そのため、現在の実装はNode.jsが最大1MBずつRange取得し、レスポンスを連結してFFmpegの標準入力へ渡します。完全ダウンロードや中間音声ファイルは作りません。この違いを吸収した状態で6/6成功しています。
 
 これはローカル回線での一点観測です。公開サーバーのデータセンターIP、YouTube側の仕様変更、動画ごとの再生条件では結果が変わるため、公開環境でも同じCLIを実行して比較する必要があります。
+
+## Render Singapore検証
+
+検証日: 2026-09-18
+
+Renderの無料Docker Web Serviceへ同じ実装をデプロイし、SingaporeリージョンのデータセンターIPから検証しました。
+
+- サービス: `https://yt-audio-test.onrender.com`
+- Node.js 22.23.2 / Linux x64
+- Cookie、ログイン、PO Tokenなし
+- 対象動画: 3本
+- クライアント: `ANDROID_VR`、`IOS`、`WEB`、`MWEB`、`ANDROID`、`TV`
+
+| 工程 | 成功率 |
+|---|---:|
+| InnerTube応答／metadata | 18/18 (100%) |
+| audio-only直URL取得 | 0/18 (0%) |
+| GoogleVideo実データ取得 | 0/18 (0%) |
+| FFmpeg変換 | 0/18 (0%) |
+
+全18件でplayability statusは`LOGIN_REQUIRED`、理由は「ログインして bot ではないことを確認してください」でした。format一覧や直URLが返る前の段階で止まっているため、GoogleVideo側のHTTP 403やFFmpeg処理が原因ではありません。
+
+今回の条件では、InnerTubeクライアントを切り替えるだけではRenderのデータセンターIP判定を回避できませんでした。ローカルは同じ動画・実装・Cookieなしで成功しているため、主な差は実行元ネットワークです。
