@@ -133,6 +133,8 @@ npm run worker:dev
 
 匿名一時配置での実測では、Coordinator経由の3試行すべてがHTTP 206の音声取得まで成功し、`apac-se`と`weur`が成功経路として使われました。
 
+恒久配置後の最終試験でも`apac-se`経由でHTTP 206、`audio/mp4`、itag 140の取得に成功しています。公開Workerのヘルスチェックは `https://yt-audio-regional-resolver.youtube-audio-stream-probe.workers.dev/health` です。
+
 ## ブラウザ側取得の実証
 
 `browser-probe/`は、Chromium拡張のService WorkerからGoogleVideoをRange取得できるかを確認する最小ハーネスです。別途[LuanRT/ytc-bridge](https://github.com/LuanRT/ytc-bridge)をビルドして未パック拡張として読み込み、次を実行します。

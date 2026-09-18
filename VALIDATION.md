@@ -157,3 +157,18 @@ Coordinator経由で3回実行した結果は3/3成功でした。
 | 3 | `weur` | HTTP 206 | `audio/mp4` | 65,536 bytes |
 
 すべてitag 140を選択しました。試行ごとに`apac-se`と`weur`が切り替わっても完走しており、Coordinatorのフォールバックと地域内完結ストリーミングが実動することを確認できました。Quick Tunnelは検証後に停止し、本番依存には含めません。
+
+## 恒久配置での最終確認
+
+検証日: 2026-09-18
+
+Renderへ最新版を手動デプロイし、Cloudflareアカウントの恒久Workerへ同じCoordinatorとDurable Objectを配置しました。
+
+- Worker: `https://yt-audio-regional-resolver.youtube-audio-stream-probe.workers.dev`
+- Render変換API: `https://yt-audio-test.onrender.com/api/decipher`
+- Worker認証: `WORKER_TOKEN` Secret
+- Googleアカウント、Cookie、ブラウザ拡張、外部ダウンロードAPI: すべて未使用
+
+固定公開動画`jNQXAC9IVRw`に対して、恒久Workerの`/audio`へ64KiBのRangeリクエストを送信しました。`apac-se`が採用され、HTTP 206、`audio/mp4`、itag 140、65,536 bytesの取得に成功しました。
+
+これにより、一時WorkerやQuick Tunnelに依存しない恒久構成でも、URL入力から地域選択、Player変換、同地域GoogleVideo取得までの全経路が動作することを確認しました。
