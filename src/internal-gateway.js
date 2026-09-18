@@ -10,6 +10,7 @@ const port = Number(process.env.INTERNAL_GATEWAY_PORT || 10001);
 const helperTimeoutMs = Number(process.env.INTERNAL_HELPER_TIMEOUT_MS || 45_000);
 const maxQueue = Number(process.env.INTERNAL_HELPER_MAX_QUEUE || 2);
 const poCacheTtlMs = Number(process.env.INTERNAL_PO_CACHE_TTL_MS || 240_000);
+const helperMaxOldSpaceMb = Number(process.env.INTERNAL_HELPER_MAX_OLD_SPACE_MB || 224);
 const bearerToken = process.env.DECIPHER_TOKEN || '';
 const cliPath = fileURLToPath(new URL('./internal-cli.js', import.meta.url));
 const signatureNonces = new Map();
@@ -68,7 +69,7 @@ function signedRequestMatches(request, rawBody, pathname) {
 
 function runChild(operation, rawBody) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ['--max-old-space-size=160', cliPath, operation], {
+    const child = spawn(process.execPath, [`--max-old-space-size=${helperMaxOldSpaceMb}`, cliPath, operation], {
       env: { ...process.env, NODE_ENV: 'production' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -167,6 +168,7 @@ const server = http.createServer(async (request, response) => {
         waiting: pending.length,
         poTokenCacheEntries: poTokenCache.size,
         poTokenInFlight: poTokenInFlight.size,
+        helperMaxOldSpaceMb,
       });
     }
     const operations = new Map([
