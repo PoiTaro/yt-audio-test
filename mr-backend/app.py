@@ -994,9 +994,10 @@ def _extract_vocals_chunked(
     karaoke = np.asarray(karaoke, dtype=np.float32)
     natural_output = np.zeros(output_length, dtype=np.float32)
     enhanced_output = np.zeros(output_length, dtype=np.float32)
-    # 3秒ごとに処理し、前後0.75秒をクロスフェードする。
-    # 長さと同じウェイト配列は持たず、直前区間とその場で合成する。
-    chunk_samples = 3 * SAMPLE_RATE
+    # 8秒ごとに処理し、前後0.75秒をクロスフェードする。
+    # STFT条件と重なり幅は維持しつつ、区間境界の重複計算だけを減らす。
+    # 最大メモリはRender Freeの512MB内に収まる。
+    chunk_samples = 8 * SAMPLE_RATE
     overlap_samples = 3 * SAMPLE_RATE // 4
     step_samples = chunk_samples - overlap_samples
     starts = list(range(0, output_length, step_samples))
@@ -1355,6 +1356,121 @@ def extract_vocals(
 
 def _finish_vocal_enhancement(samples: np.ndarray, sample_rate: int, output_path: Path) -> None:
     """低域整理・緩やかな圧縮・ラウドネス正規化で声を聴きやすくする。"""
+    if LOW_MEMORY_MODE:
+        # FFmpegのloudnormは弱いCPUでは音声実時間の約1/6を要する。
+        # 同じ仕上げ（70Hz整理、2.2:1 RMS圧縮、-16 dBFS正規化、
+        # -1.5 dBFSピーク制限）をSciPyのベクトル演算で行う。
+        source = np.asarray(samples, dtype=np.float32)
+        highpass = sps.butter(
+            2,
+            70.0,
+            btype="highpass",
+            fs=sample_rate,
+            output="sos",
+        )
+        processed = sps.sosfilt(highpass, source).astype(np.float32, copy=False)
+
+        rms_window = max(3, int(round(sample_rate * 0.020)))
+        threshold = np.float32(0.0631)
+        ratio = np.float32(2.2)
+        # 短い先読みでピークを確実に捕捉し、120msで滑らかに戻す。
+        attack_samples = max(3, int(round(sample_rate * 0.015)))
+        release_samples = max(3, int(round(sample_rate * 0.120)))
+        compressor_padding = max(rms_window, attack_samples, release_samples)
+        compressor_chunk = 8 * sample_rate
+        compressed = np.empty_like(processed)
+        for center_start in range(0, len(processed), compressor_chunk):
+            center_end = min(len(processed), center_start + compressor_chunk)
+            source_start = max(0, center_start - compressor_padding)
+            source_end = min(len(processed), center_end + compressor_padding)
+            segment = processed[source_start:source_end]
+            power = np.square(segment, dtype=np.float32)
+            envelope = ndi.uniform_filter1d(
+                power,
+                size=rms_window,
+                mode="nearest",
+            ).astype(np.float32, copy=False)
+            del power
+            np.maximum(envelope, np.float32(1e-12), out=envelope)
+            np.sqrt(envelope, out=envelope)
+            target_gain = np.full(envelope.shape, np.float32(1.4125), dtype=np.float32)
+            above_threshold = envelope > threshold
+            if np.any(above_threshold):
+                target_gain[above_threshold] = (
+                    threshold
+                    * np.power(
+                        envelope[above_threshold] / threshold,
+                        np.float32(1.0) / ratio,
+                    )
+                    / envelope[above_threshold]
+                    * np.float32(1.4125)
+                )
+            target_gain = ndi.minimum_filter1d(
+                target_gain,
+                size=attack_samples,
+                mode="nearest",
+            ).astype(np.float32, copy=False)
+            target_gain = ndi.uniform_filter1d(
+                target_gain,
+                size=release_samples,
+                mode="nearest",
+            ).astype(np.float32, copy=False)
+            local_start = center_start - source_start
+            local_end = local_start + (center_end - center_start)
+            compressed[center_start:center_end] = (
+                segment[local_start:local_end] * target_gain[local_start:local_end]
+            )
+        processed = compressed
+
+        # 無音を除いた400msブロックでラウドネスを見積もる。
+        # さらに相対-10dBゲートを掛け、曲間の無音で音量が上がり過ぎないようにする。
+        block_samples = max(1, int(round(sample_rate * 0.400)))
+        complete_samples = len(processed) - (len(processed) % block_samples)
+        if complete_samples:
+            blocks = processed[:complete_samples].reshape(-1, block_samples)
+            block_power = (
+                np.einsum("ij,ij->i", blocks, blocks, dtype=np.float64)
+                / block_samples
+            )
+            audible = block_power > 10.0 ** (-70.0 / 10.0)
+            if np.any(audible):
+                preliminary_power = float(np.mean(block_power[audible]))
+                relative_gate = preliminary_power * 0.1
+                gated = block_power[audible & (block_power >= relative_gate)]
+                loudness_power = float(np.mean(gated)) if gated.size else preliminary_power
+                target_rms = 10.0 ** (-16.0 / 20.0)
+                loudness_gain = target_rms / math.sqrt(max(loudness_power, 1e-12))
+                processed *= np.float32(loudness_gain)
+
+        peak = max(
+            abs(float(np.max(processed, initial=0.0))),
+            abs(float(np.min(processed, initial=0.0))),
+        )
+        peak_limit = 10.0 ** (-1.5 / 20.0)
+        if peak > peak_limit:
+            # 全体を下げず、-3dBFSより上の瞬間的なピークだけを滑らかに制限する。
+            # loudnorm同様、目標ラウドネスを保ったままクリップを防ぐ。
+            limiter_knee = 10.0 ** (-3.0 / 20.0)
+            limiter_width = peak_limit - limiter_knee
+            for start in range(0, len(processed), 8 * sample_rate):
+                block = processed[start : start + 8 * sample_rate]
+                magnitudes = np.abs(block)
+                limited = magnitudes > limiter_knee
+                if np.any(limited):
+                    block[limited] = (
+                        np.sign(block[limited])
+                        * (
+                            limiter_knee
+                            + limiter_width
+                            * np.tanh(
+                                (magnitudes[limited] - limiter_knee)
+                                / limiter_width
+                            )
+                        )
+                    )
+        np.nan_to_num(processed, copy=False)
+        sf.write(output_path, processed, sample_rate, subtype="PCM_16")
+        return
     if not FFMPEG_PATH:
         sf.write(output_path, samples, sample_rate)
         return
@@ -1458,6 +1574,11 @@ def _extract(
         scale_factor,
         time_map,
     )
+    has_time_map = time_map is not None
+    # 仕上げ処理には抽出済み波形だけあればよい。長尺入力と時刻対応を先に解放し、
+    # 512MB環境でも高速なベクトル処理用の余白を確保する。
+    del original, karaoke, time_map
+    _trim_process_memory()
     if progress:
         progress(91, "ボーカルを聴きやすく整えています")
     natural_name = _unique_name("extracted_vocals_natural.wav")
@@ -1465,6 +1586,8 @@ def _extract(
     natural_path = MEDIA_DIR / natural_name
     enhanced_path = MEDIA_DIR / enhanced_name
     sf.write(natural_path, natural_vocals, sample_rate)
+    del natural_vocals
+    _trim_process_memory()
     _finish_vocal_enhancement(enhanced_vocals, sample_rate, enhanced_path)
     if progress:
         progress(96, "再生データを仕上げています")
@@ -1473,9 +1596,9 @@ def _extract(
         "vocal_natural_url": f"/media/{natural_name}",
         "vocal_enhanced": True,
         "offset_seconds": offset,
-        "alignment_mode": "hierarchical_fine" if time_map is not None else "global",
+        "alignment_mode": "hierarchical_fine" if has_time_map else "global",
         "alignment_resolution_ms": round(64 / 11_025 * 1_000, 2)
-        if time_map is not None
+        if has_time_map
         else None,
     }
     if video_name and FFMPEG_PATH:
