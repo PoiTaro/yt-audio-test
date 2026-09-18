@@ -44,6 +44,19 @@ class SecurityBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 413)
 
+    def test_integrated_helper_routes_are_hidden_when_not_configured(self):
+        with mock.patch.object(backend, "INTEGRATED_NODE_GATEWAY_URL", ""):
+            response = self.client.post("/api/pot", json={"videoId": "jNQXAC9IVRw"})
+        self.assertEqual(response.status_code, 404)
+
+    def test_integrated_helper_body_limit_is_enforced(self):
+        response = self.client.post(
+            "/api/decipher",
+            data=b"x" * (backend.MAX_JSON_BODY_BYTES + 1),
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 413)
+
     def test_media_requires_a_valid_expiring_signature(self):
         name = f"security_test_{uuid.uuid4().hex}.txt"
         path = backend.MEDIA_DIR / name
@@ -83,6 +96,13 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertEqual(payload["limits"]["max_concurrent_jobs"], 1)
         self.assertEqual(payload["limits"]["max_queued_jobs"], backend.MAX_QUEUED_JOBS)
         self.assertIn("waiting", payload["queue"])
+        self.assertEqual(payload["node_gateway"]["status"], "disabled")
+
+    def test_health_fails_when_configured_node_gateway_is_down(self):
+        with mock.patch.object(backend, "INTEGRATED_NODE_GATEWAY_URL", "http://127.0.0.1:1"):
+            response = self.client.get("/health")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["node_gateway"]["status"], "unavailable")
 
     def test_queued_url_jobs_never_overlap(self):
         running = 0

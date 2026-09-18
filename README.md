@@ -103,6 +103,19 @@ RenderではDocker Web Serviceとしてデプロイしてください。`render.
 
 `DECIPHER_TOKEN`を設定すると、`/api/decipher`は同じ値の`Authorization: Bearer ...`を要求します。本番では必ずCloudflare WorkerとRenderの双方に共有Secretとして設定してください。GoogleのCookieやアカウント情報ではありません。
 
+## Render統合サービス
+
+`Dockerfile.integrated`は、MR処理用PythonアプリとYouTube内部処理用Node.jsを1つのRenderサービスへまとめる本番候補です。Nodeの重い処理は常駐させず、署名済みの`/api/pot`または`/api/decipher`要求を受けた時だけ子プロセスで起動し、処理後に終了します。要求は1件ずつ実行されるため、MR解析と複数のNode処理が同時にメモリを消費しにくい構成です。
+
+Renderの新規Docker Web Serviceでは、リポジトリルートを指定し、Dockerfile Pathを`Dockerfile.integrated`、Health Check Pathを`/health`にします。最低限、次のSecretを設定します。
+
+- `YT_AUDIO_WORKER_TOKEN`: Cloudflare Workerの`WORKER_TOKEN`と同じ値
+- `MEDIA_SIGNING_KEY`: 十分に長いランダム値
+
+`INTEGRATED_NODE_GATEWAY_URL`、低メモリ設定、ポート設定はDockerfileに安全な既定値があります。ローカル静的UIから試験する間は、`FRONTEND_ORIGINS`に`http://127.0.0.1:4173,http://localhost:4173`を設定します。
+
+新サービスの`/health`で`node_gateway.status`が`ok`になり、実動画を複数回処理できるまでは既存のPythonサービスとNodeサービスを停止しないでください。Cloudflare Workerの`RENDER_DECIPHER_URL`を新サービスの`/api/decipher`へ切り替えて安定性を確認した後、旧サービスをSuspendします。
+
 追加の診断用環境変数:
 
 - `PO_TOKEN_MODE=webpo`: `bgutils-js`で同一IPのWeb PO Tokenを生成し、GoogleVideo URLへ付与

@@ -23,7 +23,7 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
-from flask import Flask, jsonify, redirect, render_template, request, send_from_directory
+from flask import Flask, Response, jsonify, redirect, render_template, request, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
@@ -56,6 +56,7 @@ YT_AUDIO_WORKER_URL = os.environ.get(
     "YT_AUDIO_WORKER_URL",
     "https://yt-audio-regional-resolver.youtube-audio-stream-probe.workers.dev/audio",
 ).strip()
+INTEGRATED_NODE_GATEWAY_URL = os.environ.get("INTEGRATED_NODE_GATEWAY_URL", "").strip().rstrip("/")
 
 
 def _integer_setting(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -183,7 +184,7 @@ def _add_frontend_cors_headers(response):
 
 @app.before_request
 def _validate_request_origin_and_size():
-    if request.path in {"/extract", "/download", "/download/start"}:
+    if request.path in {"/extract", "/download", "/download/start", "/api/pot", "/api/decipher"}:
         content_length = request.content_length
         if content_length is not None and content_length > MAX_JSON_BODY_BYTES:
             return jsonify(error="リクエストが大きすぎます。"), 413
@@ -2125,9 +2126,20 @@ def index():
 @app.get("/health")
 def health():
     """静的UIが処理サーバーを先に起こすための軽量エンドポイント。"""
-    return jsonify(
+    node_gateway = {"configured": bool(INTEGRATED_NODE_GATEWAY_URL), "status": "disabled"}
+    if INTEGRATED_NODE_GATEWAY_URL:
+        try:
+            with urlrequest.urlopen(f"{INTEGRATED_NODE_GATEWAY_URL}/health", timeout=0.75) as response:
+                node_gateway = {
+                    "configured": True,
+                    "status": "ok" if response.status == 200 else "unavailable",
+                }
+        except (OSError, urlerror.URLError, TimeoutError):
+            node_gateway = {"configured": True, "status": "unavailable"}
+    response = jsonify(
         status="ok",
         analysis_ready=np is not None,
+        node_gateway=node_gateway,
         limits={
             "max_content_mb": MAX_CONTENT_MB,
             "max_duration_seconds": MAX_MEDIA_DURATION_SECONDS,
@@ -2139,6 +2151,59 @@ def health():
             "waiting": JOB_QUEUE.qsize(),
         },
     )
+    if INTEGRATED_NODE_GATEWAY_URL and node_gateway["status"] != "ok":
+        response.status_code = 503
+    return response
+
+
+def _proxy_to_integrated_node(path: str):
+    """署名対象の生ボディとヘッダーをローカルNodeへそのまま中継する。"""
+    if not INTEGRATED_NODE_GATEWAY_URL:
+        return jsonify(error="Not found"), 404
+    raw_body = request.get_data(cache=False)
+    headers = {"Content-Type": request.headers.get("Content-Type", "application/json")}
+    for name in (
+        "Authorization",
+        "X-Resolver-Timestamp",
+        "X-Resolver-Nonce",
+        "X-Resolver-Signature",
+    ):
+        value = request.headers.get(name)
+        if value:
+            headers[name] = value
+    upstream_request = urlrequest.Request(
+        f"{INTEGRATED_NODE_GATEWAY_URL}{path}",
+        data=raw_body,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlrequest.urlopen(upstream_request, timeout=50) as upstream:
+            body = upstream.read(MAX_JSON_BODY_BYTES * 8)
+            return Response(
+                body,
+                status=upstream.status,
+                content_type=upstream.headers.get("Content-Type", "application/json; charset=utf-8"),
+            )
+    except urlerror.HTTPError as error:
+        body = error.read(MAX_JSON_BODY_BYTES * 8)
+        return Response(
+            body,
+            status=error.code,
+            content_type=error.headers.get("Content-Type", "application/json; charset=utf-8"),
+        )
+    except (OSError, urlerror.URLError, TimeoutError):
+        return jsonify(error="Internal resolver helper is unavailable"), 502
+
+
+@app.post("/api/pot")
+def integrated_po_token():
+    return _proxy_to_integrated_node("/api/pot")
+
+
+@app.post("/api/decipher")
+def integrated_decipher():
+    return _proxy_to_integrated_node("/api/decipher")
 
 
 @app.get("/media/<path:filename>")
