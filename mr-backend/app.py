@@ -2196,6 +2196,22 @@ def _proxy_to_integrated_node(path: str):
         return jsonify(error="Internal resolver helper is unavailable"), 502
 
 
+def _release_integrated_node_worker() -> None:
+    """音声解析を始める前に一時Nodeのメモリを確実に解放する。"""
+    if not INTEGRATED_NODE_GATEWAY_URL:
+        return
+    release_request = urlrequest.Request(
+        f"{INTEGRATED_NODE_GATEWAY_URL}/release",
+        data=b"",
+        method="POST",
+    )
+    try:
+        with urlrequest.urlopen(release_request, timeout=5) as response:
+            response.read(1_024)
+    except (OSError, urlerror.URLError, TimeoutError):
+        app.logger.warning("integrated Node worker release failed", exc_info=True)
+
+
 @app.post("/api/pot")
 def integrated_po_token():
     return _proxy_to_integrated_node("/api/pot")
@@ -2386,25 +2402,28 @@ def _run_download(video_url: str, karaoke_url: str, progress=None) -> dict:
     # ステージ音声・プレビュー動画・比較音源は互いに独立しているため、
     # Resolver取得とFFmpeg変換を同時に進める。
     report(7, "必要な動画と音声を同時に取得しています")
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        original_future = executor.submit(_download_audio, video_url, "original")
-        preview_future = executor.submit(_download_video, video_url)
-        karaoke_future = (
-            executor.submit(_download_audio, karaoke_url, "karaoke")
-            if karaoke_url
-            else None
-        )
-        original_name = original_future.result()
-        report(26, "ステージ音声を取得しました")
-        preview_name = original_name
-        preview_is_audio_only = True
-        try:
-            preview_name = preview_future.result()
-            preview_is_audio_only = False
-        except Exception:
-            pass
-        report(43, "動画プレビューを取得しました")
-        karaoke_name = karaoke_future.result() if karaoke_future else None
+    try:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            original_future = executor.submit(_download_audio, video_url, "original")
+            preview_future = executor.submit(_download_video, video_url)
+            karaoke_future = (
+                executor.submit(_download_audio, karaoke_url, "karaoke")
+                if karaoke_url
+                else None
+            )
+            original_name = original_future.result()
+            report(26, "ステージ音声を取得しました")
+            preview_name = original_name
+            preview_is_audio_only = True
+            try:
+                preview_name = preview_future.result()
+                preview_is_audio_only = False
+            except Exception:
+                pass
+            report(43, "動画プレビューを取得しました")
+            karaoke_name = karaoke_future.result() if karaoke_future else None
+    finally:
+        _release_integrated_node_worker()
 
     response = {
         "video_url": _media_url(preview_name),

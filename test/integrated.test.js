@@ -75,6 +75,9 @@ test('lightweight gateway is healthy and rejects unsigned work', async () => {
     assert.equal(healthPayload.poTokenCacheEntries, 0);
     assert.equal(healthPayload.poTokenInFlight, 0);
     assert.equal(healthPayload.decipherWorkerActive, false);
+    const release = await fetch(`http://127.0.0.1:${port}/release`, { method: 'POST' });
+    assert.equal(release.status, 200);
+    assert.equal((await release.json()).released, false);
     const unauthorized = await fetch(`http://127.0.0.1:${port}/api/pot`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
