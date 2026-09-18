@@ -91,6 +91,7 @@ class PotokenExtractor:
                 headless=False,
                 browser_executable_path=self.browser_path,
                 user_data_dir=self.profile_path,
+                no_sandbox=True,
             )
             try:
                 tab = browser.main_tab
