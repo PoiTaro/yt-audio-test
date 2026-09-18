@@ -76,6 +76,18 @@ YouTubeへSession dataを問い合わせずVisitor Dataをローカル生成す�
 
 リージョン変更、クライアント変更、専用Session、ローカルVisitor Dataだけでは改善しませんでした。
 
+## GitHubホステッドランナー検証
+
+GitHub Actionsの`ubuntu-latest`、`windows-latest`、`macos-latest`から、同じ固定公開動画を`ANDROID_VR`と`IOS`で検証しました。OSと実行基盤が異なる6条件すべてでmetadata応答は得られましたが、playabilityは`LOGIN_REQUIRED`となり、直URLは0/6でした。
+
+| 実行環境 | metadata | 直URL | 主結果 |
+|---|---:|---:|---|
+| Ubuntu | 2/2 | 0/2 | `LOGIN_REQUIRED` |
+| Windows | 2/2 | 0/2 | `LOGIN_REQUIRED` |
+| macOS | 2/2 | 0/2 | `LOGIN_REQUIRED` |
+
+Renderだけの問題ではなく、未認証のデータセンター実行環境全般で同じbot確認に止められる傾向が確認できました。単純に無料クラウドやOSを切り替えるだけでは改善しません。
+
 ## PO Token検証
 
 `bgutils-js`で同じ実行元IPからWeb PO Tokenを生成し、GoogleVideo URLへ`pot`を付与する実験を追加しました。
