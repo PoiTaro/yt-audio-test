@@ -23,6 +23,7 @@ const sessionMode = process.env.SESSION_MODE || 'dedicated';
 const generateSessionLocally = process.env.GENERATE_SESSION_LOCALLY === 'true';
 const poTokenMode = process.env.PO_TOKEN_MODE || 'none';
 const sessionTokenUrl = process.env.SESSION_TOKEN_URL || '';
+const runStartupValidation = process.env.RUN_STARTUP_VALIDATION === 'true';
 const playerCache = new Map();
 
 const state = {
@@ -349,5 +350,11 @@ async function runValidation() {
 
 server.listen(port, '0.0.0.0', () => {
   console.log(`Listening on 0.0.0.0:${port}`);
-  runValidation();
+  if (runStartupValidation) {
+    runValidation();
+  } else {
+    state.status = 'ready';
+    state.completedAt = new Date().toISOString();
+    console.log('Startup validation skipped; resolver API is ready');
+  }
 });
