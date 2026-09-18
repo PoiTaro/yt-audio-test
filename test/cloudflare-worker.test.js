@@ -6,7 +6,10 @@ import {
   parseContentRange,
   selectBestAudio,
   selectBestVideo,
+  signedInternalHeaders,
 } from '../cloudflare-worker/src/resolver.js';
+import { createPublicKey } from 'node:crypto';
+import { verifyInternalSignature } from '../src/internal-auth.js';
 
 test('extractVideoId accepts common YouTube URL forms', () => {
   const id = 'jNQXAC9IVRw';
@@ -64,4 +67,31 @@ test('parseContentRange validates bounded byte ranges', () => {
   assert.equal(parseContentRange('bytes */15000000'), null);
   assert.equal(parseContentRange('bytes 10-9/100'), null);
   assert.equal(parseContentRange('bytes 0-100/100'), null);
+});
+
+test('worker signatures are accepted by the internal Render verifier', async () => {
+  const keys = await crypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    true,
+    ['sign', 'verify'],
+  );
+  const privateJwk = await crypto.subtle.exportKey('jwk', keys.privateKey);
+  const publicJwk = await crypto.subtle.exportKey('jwk', keys.publicKey);
+  const body = JSON.stringify({ videoId: 'jNQXAC9IVRw' });
+  const headers = await signedInternalHeaders(
+    'https://internal.example/api/pot',
+    body,
+    JSON.stringify(privateJwk),
+  );
+  const input = {
+    timestamp: headers['X-Resolver-Timestamp'],
+    nonce: headers['X-Resolver-Nonce'],
+    pathname: '/api/pot',
+    rawBody: body,
+    signature: headers['X-Resolver-Signature'],
+    publicKey: createPublicKey({ key: publicJwk, format: 'jwk' }),
+  };
+  assert.equal(verifyInternalSignature(input), true);
+  assert.equal(verifyInternalSignature({ ...input, rawBody: `${body} ` }), false);
+  assert.equal(verifyInternalSignature({ ...input, pathname: '/api/decipher' }), false);
 });

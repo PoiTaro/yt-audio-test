@@ -16,13 +16,17 @@ RUN apt-get update \
 
 WORKDIR /app
 
+RUN useradd --create-home --uid 10001 appuser
+
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py ./
-COPY templates ./templates
-COPY static ./static
-RUN mkdir -p /app/web_media
+COPY --chown=appuser:appuser app.py ./
+COPY --chown=appuser:appuser templates ./templates
+COPY --chown=appuser:appuser static ./static
+RUN mkdir -p /app/web_media && chown appuser:appuser /app/web_media
+
+USER appuser
 
 EXPOSE 10000
 

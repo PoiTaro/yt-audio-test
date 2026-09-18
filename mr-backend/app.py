@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import os
+import queue
 import re
+import hashlib
+import hmac
+import secrets
 import shutil
 import subprocess
 import threading
@@ -12,7 +16,6 @@ import uuid
 import math
 import gc
 import ctypes
-import ipaddress
 from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict, deque
 from pathlib import Path
@@ -65,13 +68,17 @@ def _integer_setting(name: str, default: int, minimum: int, maximum: int) -> int
     return max(minimum, min(maximum, value))
 
 
-MAX_CONTENT_MB = _integer_setting("MAX_CONTENT_MB", 200, 25, 500)
-MAX_MEDIA_DURATION_SECONDS = _integer_setting("MAX_MEDIA_DURATION_SECONDS", 10 * 60, 60, 60 * 60)
+MAX_CONTENT_MB = _integer_setting("MAX_CONTENT_MB", 80, 25, 200)
+MAX_MEDIA_DURATION_SECONDS = _integer_setting("MAX_MEDIA_DURATION_SECONDS", 4 * 60, 60, 15 * 60)
 MEDIA_TTL_SECONDS = _integer_setting("MEDIA_TTL_SECONDS", 30 * 60, 5 * 60, 24 * 60 * 60)
-MAX_CONCURRENT_JOBS = _integer_setting("MAX_CONCURRENT_JOBS", 1, 1, 4)
+# Render Freeの512 MB内で解析行列が重ならないよう、処理本体は常に1件だけ実行する。
+MAX_CONCURRENT_JOBS = 1
+MAX_QUEUED_JOBS = _integer_setting("MAX_QUEUED_JOBS", 3, 1, 5)
 RATE_LIMIT_REQUESTS = _integer_setting("RATE_LIMIT_REQUESTS", 5, 1, 100)
 RATE_LIMIT_WINDOW_SECONDS = _integer_setting("RATE_LIMIT_WINDOW_SECONDS", 60 * 60, 60, 24 * 60 * 60)
+GLOBAL_RATE_LIMIT_REQUESTS = _integer_setting("GLOBAL_RATE_LIMIT_REQUESTS", 20, 2, 500)
 CLEANUP_INTERVAL_SECONDS = _integer_setting("CLEANUP_INTERVAL_SECONDS", 60, 15, 10 * 60)
+MAX_JSON_BODY_BYTES = _integer_setting("MAX_JSON_BODY_BYTES", 16_384, 1_024, 65_536)
 LOW_MEMORY_MODE = os.environ.get("LOW_MEMORY_MODE", "").strip().lower() in {
     "1",
     "true",
@@ -123,6 +130,8 @@ app = Flask(__name__)
 # Renderなどのリバースプロキシ1段を信頼し、利用者IPとHTTPS URLを正しく扱う。
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.config["MAX_CONTENT_LENGTH"] = MAX_CONTENT_MB * 1_024 * 1_024
+_configured_media_signing_key = os.environ.get("MEDIA_SIGNING_KEY", "").encode("utf-8")
+MEDIA_SIGNING_KEY = _configured_media_signing_key or secrets.token_bytes(32)
 ALIGNMENT_CACHE: dict[
     tuple[str, int, int, str, int, int],
     tuple[np.ndarray, np.ndarray, np.ndarray],
@@ -134,6 +143,8 @@ PROCESSING_STATE_LOCK = threading.Lock()
 ACTIVE_PROCESSING = 0
 RATE_LIMITS: dict[str, deque[float]] = defaultdict(deque)
 RATE_LIMITS_LOCK = threading.Lock()
+GLOBAL_RATE_LIMITS: deque[float] = deque()
+JOB_QUEUE: queue.Queue[tuple[str, str, str]] = queue.Queue(maxsize=MAX_QUEUED_JOBS)
 RESULT_VIDEO_CACHE: dict[tuple[str, str, float], str] = {}
 RESULT_VIDEO_CACHE_LOCK = threading.Lock()
 
@@ -143,17 +154,6 @@ def _add_frontend_cors_headers(response):
     """許可した静的UIからだけAPIと一時メディアを読めるようにする。"""
     origin = (request.headers.get("Origin") or "").rstrip("/")
     allowed = origin in FRONTEND_ORIGINS
-    if origin and not allowed:
-        parsed = urlparse.urlparse(origin)
-        hostname = (parsed.hostname or "").lower()
-        if parsed.scheme == "http" and hostname == "localhost":
-            allowed = True
-        elif parsed.scheme == "http":
-            try:
-                address = ipaddress.ip_address(hostname)
-                allowed = address.is_private or address.is_loopback
-            except ValueError:
-                pass
     if allowed:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
@@ -162,7 +162,39 @@ def _add_frontend_cors_headers(response):
         response.headers["Access-Control-Expose-Headers"] = (
             "Accept-Ranges, Content-Length, Content-Range, Retry-After"
         )
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
+        "form-action 'self'; script-src 'self'; style-src 'self'; "
+        "img-src 'self' data: https://i.ytimg.com; media-src 'self' blob:; "
+        "connect-src 'self' " + " ".join(sorted(FRONTEND_ORIGINS))
+    ).strip()
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+    if not request.path.startswith("/static/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    if request.is_secure:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
+
+
+@app.before_request
+def _validate_request_origin_and_size():
+    if request.path in {"/extract", "/download", "/download/start"}:
+        content_length = request.content_length
+        if content_length is not None and content_length > MAX_JSON_BODY_BYTES:
+            return jsonify(error="リクエストが大きすぎます。"), 413
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    origin = (request.headers.get("Origin") or "").rstrip("/")
+    if not origin:
+        return None
+    own_origin = request.host_url.rstrip("/")
+    if origin != own_origin and origin not in FRONTEND_ORIGINS:
+        return jsonify(error="許可されていない送信元です。"), 403
+    return None
 
 
 def _update_job(job_id: str, **changes) -> None:
@@ -178,9 +210,9 @@ def _job_snapshot(job_id: str) -> dict | None:
         return dict(job) if job else None
 
 
-def _acquire_processing_slot() -> bool:
+def _acquire_processing_slot(blocking: bool = False) -> bool:
     global ACTIVE_PROCESSING
-    if not PROCESSING_SEMAPHORE.acquire(blocking=False):
+    if not PROCESSING_SEMAPHORE.acquire(blocking=blocking):
         return False
     with PROCESSING_STATE_LOCK:
         ACTIVE_PROCESSING += 1
@@ -205,34 +237,63 @@ def _consume_rate_limit() -> int:
     client_ip = request.remote_addr or "unknown"
     cutoff = now - RATE_LIMIT_WINDOW_SECONDS
     with RATE_LIMITS_LOCK:
+        while GLOBAL_RATE_LIMITS and GLOBAL_RATE_LIMITS[0] <= cutoff:
+            GLOBAL_RATE_LIMITS.popleft()
+        if len(GLOBAL_RATE_LIMITS) >= GLOBAL_RATE_LIMIT_REQUESTS:
+            return max(1, int(RATE_LIMIT_WINDOW_SECONDS - (now - GLOBAL_RATE_LIMITS[0])))
         attempts = RATE_LIMITS[client_ip]
         while attempts and attempts[0] <= cutoff:
             attempts.popleft()
         if len(attempts) >= RATE_LIMIT_REQUESTS:
             return max(1, int(RATE_LIMIT_WINDOW_SECONDS - (now - attempts[0])))
         attempts.append(now)
+        GLOBAL_RATE_LIMITS.append(now)
     return 0
 
 
 def _begin_processing():
     if not _acquire_processing_slot():
         return jsonify(error="現在ほかの処理を実行中です。完了後にもう一度お試しください。"), 503
-    retry_after = _consume_rate_limit()
-    if retry_after:
+    rejection = _rate_limit_rejection()
+    if rejection is not None:
         _release_processing_slot()
-        response = jsonify(
-            error=f"利用回数の上限（{RATE_LIMIT_REQUESTS}回／{RATE_LIMIT_WINDOW_SECONDS // 60}分）に達しました。しばらくしてからお試しください。"
-        )
-        response.status_code = 429
-        response.headers["Retry-After"] = str(retry_after)
-        return response
+        return rejection
     return None
+
+
+def _rate_limit_rejection():
+    retry_after = _consume_rate_limit()
+    if not retry_after:
+        return None
+    response = jsonify(
+        error=f"利用回数の上限（{RATE_LIMIT_REQUESTS}回／{RATE_LIMIT_WINDOW_SECONDS // 60}分）に達しました。しばらくしてからお試しください。"
+    )
+    response.status_code = 429
+    response.headers["Retry-After"] = str(retry_after)
+    return response
+
+
+def _queued_job_ids() -> list[str]:
+    with JOB_QUEUE.mutex:
+        return [str(item[0]) for item in list(JOB_QUEUE.queue)]
+
+
+def _refresh_queue_positions() -> None:
+    queued_ids = _queued_job_ids()
+    with JOBS_LOCK:
+        now = time.time()
+        for position, job_id in enumerate(queued_ids, start=1):
+            job = JOBS.get(job_id)
+            if job and job.get("status") == "queued":
+                job.update(
+                    queue_position=position,
+                    message=f"処理待ちです（あと{position}件）",
+                    updated_at=now,
+                )
 
 
 def _cleanup_expired_state(now: float | None = None) -> int:
     """処理中を避けて、期限切れメディアとジョブ情報を削除する。"""
-    if _processing_is_active():
-        return 0
     current_time = now if now is not None else time.time()
     cutoff = current_time - MEDIA_TTL_SECONDS
     removed = 0
@@ -247,7 +308,8 @@ def _cleanup_expired_state(now: float | None = None) -> int:
         expired_jobs = [
             job_id
             for job_id, job in JOBS.items()
-            if float(job.get("updated_at", current_time)) < cutoff
+            if job.get("status") not in {"queued", "working"}
+            and float(job.get("updated_at", current_time)) < cutoff
         ]
         for job_id in expired_jobs:
             JOBS.pop(job_id, None)
@@ -259,6 +321,16 @@ def _cleanup_expired_state(now: float | None = None) -> int:
                 attempts.popleft()
             if not attempts:
                 RATE_LIMITS.pop(client_ip, None)
+        while GLOBAL_RATE_LIMITS and GLOBAL_RATE_LIMITS[0] <= rate_cutoff:
+            GLOBAL_RATE_LIMITS.popleft()
+    with RESULT_VIDEO_CACHE_LOCK:
+        for cache_key, cached_name in list(RESULT_VIDEO_CACHE.items()):
+            source_video, source_audio, _offset = cache_key
+            if not all(
+                (MEDIA_DIR / name).is_file()
+                for name in (source_video, source_audio, cached_name)
+            ):
+                RESULT_VIDEO_CACHE.pop(cache_key, None)
     return removed
 
 
@@ -326,12 +398,63 @@ def _validate_media_duration(path: Path) -> float:
     return duration
 
 
+def _public_error_message(error: Exception) -> str:
+    if isinstance(error, (ValueError, FileNotFoundError)):
+        return str(error)[:300]
+    message = str(error)
+    if "上限" in message:
+        return message[:300]
+    if "地域Resolver" in message or "YouTube" in message:
+        return "YouTubeからメディアを取得できませんでした。時間をおいてもう一度お試しください。"
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "処理が制限時間を超えました。短い動画でお試しください。"
+    return "処理中にエラーが発生しました。時間をおいてもう一度お試しください。"
+
+
 def _unique_name(filename: str, fallback_extension: str = "") -> str:
     """衝突とパストラバーサルを防いだ、保存用のファイル名を返す。"""
     safe_name = secure_filename(filename) or "upload"
     suffix = Path(safe_name).suffix or fallback_extension
     stem = Path(safe_name).stem or "upload"
-    return f"{stem}_{uuid.uuid4().hex[:12]}{suffix.lower()}"
+    return f"{stem}_{uuid.uuid4().hex}{suffix.lower()}"
+
+
+def _signed_url(path: str, **parameters) -> str:
+    expires = int(time.time()) + MEDIA_TTL_SECONDS
+    canonical_parameters = {
+        key: str(value)
+        for key, value in parameters.items()
+        if value is not None
+    }
+    canonical_parameters["expires"] = str(expires)
+    query = urlparse.urlencode(sorted(canonical_parameters.items()))
+    payload = f"{path}?{query}".encode("utf-8")
+    signature = hmac.new(MEDIA_SIGNING_KEY, payload, hashlib.sha256).hexdigest()
+    return f"{path}?{query}&sig={signature}"
+
+
+def _request_has_valid_signature(path: str) -> bool:
+    supplied_signature = request.args.get("sig", "")
+    try:
+        expires = int(request.args.get("expires", "0"))
+    except ValueError:
+        return False
+    if expires < int(time.time()) or expires > int(time.time()) + MEDIA_TTL_SECONDS + 60:
+        return False
+    parameters = {
+        key: value
+        for key, value in request.args.items()
+        if key != "sig"
+    }
+    query = urlparse.urlencode(sorted(parameters.items()))
+    payload = f"{path}?{query}".encode("utf-8")
+    expected = hmac.new(MEDIA_SIGNING_KEY, payload, hashlib.sha256).hexdigest()
+    return bool(supplied_signature) and hmac.compare_digest(supplied_signature, expected)
+
+
+def _media_url(filename: str) -> str:
+    safe_name = Path(filename).name
+    return _signed_url(f"/media/{urlparse.quote(safe_name)}")
 
 
 def _media_path(filename: str) -> Path:
@@ -1502,8 +1625,9 @@ def _finish_vocal_enhancement(samples: np.ndarray, sample_rate: int, output_path
             ],
             check=True,
             capture_output=True,
+            timeout=180,
         )
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         sf.write(output_path, samples, sample_rate)
     finally:
         raw_path.unlink(missing_ok=True)
@@ -1546,9 +1670,10 @@ def _mux_result_video(
             ],
             check=True,
             capture_output=True,
+            timeout=180,
         )
-        return f"/media/{result_name}"
-    except (FileNotFoundError, subprocess.CalledProcessError):
+        return result_name
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         result_path.unlink(missing_ok=True)
         return None
 
@@ -1611,8 +1736,8 @@ def _extract(
     if progress:
         progress(96, "再生データを仕上げています")
     result = {
-        "vocal_url": f"/media/{enhanced_name}",
-        "vocal_natural_url": f"/media/{natural_name}",
+        "vocal_url": _media_url(enhanced_name),
+        "vocal_natural_url": _media_url(natural_name),
         "vocal_enhanced": True,
         "offset_seconds": offset,
         "alignment_mode": "hierarchical_fine" if has_time_map else "global",
@@ -1623,21 +1748,19 @@ def _extract(
     if video_name and FFMPEG_PATH:
         # プレビューは元動画＋抽出音声をブラウザで同期再生できる。
         # ダウンロード用動画は利用者が押した時だけ生成し、初回結果を45秒待たせない。
-        result["result_video_url"] = "/render-video?" + urlparse.urlencode(
-            {
-                "video": video_name,
-                "audio": enhanced_name,
-                "offset": offset,
-                "variant": "enhanced",
-            }
+        result["result_video_url"] = _signed_url(
+            "/render-video",
+            video=video_name,
+            audio=enhanced_name,
+            offset=offset,
+            variant="enhanced",
         )
-        result["result_video_natural_url"] = "/render-video?" + urlparse.urlencode(
-            {
-                "video": video_name,
-                "audio": natural_name,
-                "offset": offset,
-                "variant": "natural",
-            }
+        result["result_video_natural_url"] = _signed_url(
+            "/render-video",
+            video=video_name,
+            audio=natural_name,
+            offset=offset,
+            variant="natural",
         )
     return result
 
@@ -1859,9 +1982,9 @@ def _download_media_from_worker(
         region = probe[4] or None
         content_type = probe[5]
 
-    source_path = MEDIA_DIR / f".{label}_{uuid.uuid4().hex[:12]}.source"
+    source_path = MEDIA_DIR / f".{label}_{uuid.uuid4().hex}.source"
     output_suffix = ".wav" if media_type == "audio" else ".mp4"
-    output_path = MEDIA_DIR / f"{label}_{uuid.uuid4().hex[:12]}{output_suffix}"
+    output_path = MEDIA_DIR / f"{label}_{uuid.uuid4().hex}{output_suffix}"
     completed = False
     try:
         if total_bytes > app.config["MAX_CONTENT_LENGTH"]:
@@ -1917,7 +2040,7 @@ def _download_media_from_worker(
                     "-ar",
                     str(SAMPLE_RATE),
                     "-ac",
-                    "2",
+                    "1",
                     "-c:a",
                     "pcm_s16le",
                     str(output_path),
@@ -1947,7 +2070,7 @@ def _download_audio_from_video_fallback(url: str, label: str) -> str:
         url, f"{label}_audio_fallback", "video"
     )
     video_path = _media_path(video_name)
-    output_path = MEDIA_DIR / f"{label}_{uuid.uuid4().hex[:12]}.wav"
+    output_path = MEDIA_DIR / f"{label}_{uuid.uuid4().hex}.wav"
     completed = False
     try:
         conversion = subprocess.run(
@@ -1963,7 +2086,7 @@ def _download_audio_from_video_fallback(url: str, label: str) -> str:
                 "-ar",
                 str(SAMPLE_RATE),
                 "-ac",
-                "2",
+                "1",
                 "-c:a",
                 "pcm_s16le",
                 str(output_path),
@@ -2008,13 +2131,26 @@ def health():
             "max_content_mb": MAX_CONTENT_MB,
             "max_duration_seconds": MAX_MEDIA_DURATION_SECONDS,
             "max_concurrent_jobs": MAX_CONCURRENT_JOBS,
+            "max_queued_jobs": MAX_QUEUED_JOBS,
+        },
+        queue={
+            "active": _processing_is_active(),
+            "waiting": JOB_QUEUE.qsize(),
         },
     )
 
 
 @app.get("/media/<path:filename>")
 def media(filename: str):
-    response = send_from_directory(MEDIA_DIR, Path(filename).name, conditional=True)
+    safe_name = Path(filename).name
+    signed_path = f"/media/{urlparse.quote(safe_name)}"
+    if safe_name != filename or not _request_has_valid_signature(signed_path):
+        return jsonify(error="一時メディアのURLが無効または期限切れです。"), 403
+    try:
+        media_path = _media_path(safe_name)
+    except FileNotFoundError as error:
+        return jsonify(error=str(error)), 404
+    response = send_from_directory(MEDIA_DIR, media_path.name, conditional=True)
     response.headers["Cache-Control"] = "private, no-store, max-age=0"
     response.headers["Pragma"] = "no-cache"
     return response
@@ -2023,6 +2159,8 @@ def media(filename: str):
 @app.get("/render-video")
 def render_video():
     """ダウンロード用の音声差替え動画を、要求された時だけ生成する。"""
+    if not _request_has_valid_signature("/render-video"):
+        return jsonify(error="動画生成URLが無効または期限切れです。"), 403
     video_name = Path(str(request.args.get("video", ""))).name
     audio_name = Path(str(request.args.get("audio", ""))).name
     variant = "natural" if request.args.get("variant") == "natural" else "enhanced"
@@ -2036,18 +2174,31 @@ def render_video():
     with RESULT_VIDEO_CACHE_LOCK:
         cached_name = RESULT_VIDEO_CACHE.get(cache_key)
         if cached_name and (MEDIA_DIR / cached_name).is_file():
-            return redirect(f"/media/{cached_name}", code=302)
-        result_url = _mux_result_video(
-            video_path,
-            audio_path,
-            offset,
-            f"mr_removal_video_{variant}.mp4",
-        )
-        if not result_url:
-            return jsonify(error="結果動画を生成できませんでした。"), 500
-        result_name = Path(result_url).name
-        RESULT_VIDEO_CACHE[cache_key] = result_name
-    return redirect(result_url, code=302)
+            return redirect(_media_url(cached_name), code=302)
+    rejection = _begin_processing()
+    if rejection is not None:
+        return rejection
+    try:
+        with RESULT_VIDEO_CACHE_LOCK:
+            cached_name = RESULT_VIDEO_CACHE.get(cache_key)
+            if cached_name and (MEDIA_DIR / cached_name).is_file():
+                return redirect(_media_url(cached_name), code=302)
+            result_name = _mux_result_video(
+                video_path,
+                audio_path,
+                offset,
+                f"mr_removal_video_{variant}.mp4",
+            )
+            if not result_name:
+                return jsonify(error="結果動画を生成できませんでした。"), 500
+            while len(RESULT_VIDEO_CACHE) >= 24:
+                old_key = next(iter(RESULT_VIDEO_CACHE))
+                old_name = RESULT_VIDEO_CACHE.pop(old_key)
+                (MEDIA_DIR / old_name).unlink(missing_ok=True)
+            RESULT_VIDEO_CACHE[cache_key] = result_name
+        return redirect(_media_url(result_name), code=302)
+    finally:
+        _release_processing_slot()
 
 
 @app.post("/upload")
@@ -2068,8 +2219,8 @@ def upload():
         saved_paths.append(video_path)
         _validate_media_duration(video_path)
         response = {
-            "video_url": f"/media/{video_name}",
-            "video_audio_url": f"/media/{video_name}",
+            "video_url": _media_url(video_name),
+            "video_audio_url": _media_url(video_name),
             "video_audio_filename": video_name,
             "video_filename": video_name,
             "preview_is_audio_only": preview_is_audio_only,
@@ -2091,9 +2242,10 @@ def upload():
             )
         return jsonify(response)
     except Exception as error:
+        app.logger.exception("upload processing failed")
         for path in saved_paths:
             path.unlink(missing_ok=True)
-        return jsonify(error=str(error)), 400
+        return jsonify(error=_public_error_message(error)), 400
     finally:
         _release_processing_slot()
 
@@ -2120,7 +2272,8 @@ def extract():
     except (KeyError, TypeError, ValueError, FileNotFoundError) as error:
         return jsonify(error=str(error)), 400
     except Exception as error:
-        return jsonify(error=f"抽出中にエラーが発生しました: {error}"), 500
+        app.logger.exception("extraction failed")
+        return jsonify(error=_public_error_message(error)), 500
     finally:
         _release_processing_slot()
 
@@ -2143,7 +2296,8 @@ def download():
     try:
         return jsonify(_run_download(video_url, karaoke_url))
     except Exception as error:
-        return jsonify(error=str(error)), 400
+        app.logger.exception("synchronous download failed")
+        return jsonify(error=_public_error_message(error)), 400
     finally:
         _release_processing_slot()
 
@@ -2187,8 +2341,8 @@ def _run_download(video_url: str, karaoke_url: str, progress=None) -> dict:
         karaoke_name = karaoke_future.result() if karaoke_future else None
 
     response = {
-        "video_url": f"/media/{preview_name}",
-        "video_audio_url": f"/media/{original_name}",
+        "video_url": _media_url(preview_name),
+        "video_audio_url": _media_url(original_name),
         "video_filename": preview_name,
         "video_audio_filename": original_name,
         "preview_is_audio_only": preview_is_audio_only,
@@ -2222,14 +2376,48 @@ def _download_worker(job_id: str, video_url: str, karaoke_url: str) -> None:
             result=result,
         )
     except Exception as error:
+        app.logger.exception("background download failed job_id=%s", job_id)
         _update_job(
             job_id,
             status="error",
-            message=str(error),
-            error=str(error),
+            message=_public_error_message(error),
+            error=_public_error_message(error),
         )
     finally:
         _release_processing_slot()
+
+
+def _download_queue_loop() -> None:
+    """待機中のURL処理を、メモリを重ねず必ず1件ずつ実行する。"""
+    while True:
+        job_id, video_url, karaoke_url = JOB_QUEUE.get()
+        _refresh_queue_positions()
+        acquired = False
+        try:
+            acquired = _acquire_processing_slot(blocking=True)
+            _update_job(
+                job_id,
+                status="working",
+                progress=2,
+                queue_position=None,
+                message="処理を準備しています",
+            )
+            _download_worker(job_id, video_url, karaoke_url)
+            acquired = False  # _download_workerがスロットを解放する。
+        except Exception as error:
+            if acquired:
+                _release_processing_slot()
+            app.logger.exception("queued download failed job_id=%s", job_id)
+            _update_job(
+                job_id,
+                status="error",
+                queue_position=None,
+                message=_public_error_message(error),
+                error=_public_error_message(error),
+            )
+        finally:
+            JOB_QUEUE.task_done()
+            _refresh_queue_positions()
 
 
 @app.post("/download/start")
@@ -2245,7 +2433,12 @@ def download_start():
         karaoke_url = _validate_youtube_url(karaoke_url)
     except ValueError as error:
         return jsonify(error=str(error)), 400
-    rejection = _begin_processing()
+    if JOB_QUEUE.full():
+        response = jsonify(error="処理待ちが上限に達しています。少し待ってからお試しください。")
+        response.status_code = 503
+        response.headers["Retry-After"] = "30"
+        return response
+    rejection = _rate_limit_rejection()
     if rejection is not None:
         return rejection
 
@@ -2256,23 +2449,24 @@ def download_start():
             for key in completed[:20]:
                 JOBS.pop(key, None)
         JOBS[job_id] = {
-            "status": "working",
-            "progress": 2,
-            "message": "処理を準備しています",
+            "status": "queued",
+            "progress": 1,
+            "queue_position": JOB_QUEUE.qsize() + 1,
+            "message": "処理待ちに追加しました",
             "updated_at": time.time(),
         }
     try:
-        threading.Thread(
-            target=_download_worker,
-            args=(job_id, video_url, karaoke_url),
-            daemon=True,
-        ).start()
-    except Exception:
+        JOB_QUEUE.put_nowait((job_id, video_url, karaoke_url))
+        _refresh_queue_positions()
+    except queue.Full:
         with JOBS_LOCK:
             JOBS.pop(job_id, None)
-        _release_processing_slot()
-        raise
-    return jsonify(job_id=job_id), 202
+        response = jsonify(error="処理待ちが上限に達しています。少し待ってからお試しください。")
+        response.status_code = 503
+        response.headers["Retry-After"] = "30"
+        return response
+    snapshot = _job_snapshot(job_id) or {}
+    return jsonify(job_id=job_id, queue_position=snapshot.get("queue_position", 1)), 202
 
 
 @app.get("/jobs/<job_id>")
@@ -2291,6 +2485,7 @@ def file_too_large(_error):
 # 起動時に期限切れファイルを掃除し、その後も一定間隔で確認する。
 _cleanup_expired_state()
 threading.Thread(target=_cleanup_loop, name="media-cleanup", daemon=True).start()
+threading.Thread(target=_download_queue_loop, name="download-queue", daemon=True).start()
 
 
 if __name__ == "__main__":

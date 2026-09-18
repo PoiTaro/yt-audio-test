@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -6,6 +7,7 @@ import { Platform, Player } from 'youtubei.js';
 import { buildSummary, classifyError, createResolver, extractVideoId, probeClient, probeHttp, runFfmpeg } from './core.js';
 import { extractInitialPlayerResponse, selectHtmlAudioFormat } from './html.js';
 import { createWebPoMinter } from './pot.js';
+import { verifyInternalSignature } from './internal-auth.js';
 
 Platform.shim.eval = async (data) => new Function(data.output)();
 
@@ -26,6 +28,7 @@ const sessionTokenUrl = process.env.SESSION_TOKEN_URL || '';
 const runStartupValidation = process.env.RUN_STARTUP_VALIDATION === 'true';
 const decipherToken = process.env.DECIPHER_TOKEN || '';
 const playerCache = new Map();
+const signatureNonces = new Map();
 let poMinterPromise = null;
 
 const state = {
@@ -175,17 +178,50 @@ async function readJsonBody(request, maxBytes = 16_384) {
     chunks.push(chunk);
   }
   try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    const raw = Buffer.concat(chunks).toString('utf8');
+    return { value: JSON.parse(raw), raw };
   } catch {
     throw Object.assign(new Error('Invalid JSON body'), { statusCode: 400 });
   }
 }
 
+function bearerMatches(request) {
+  if (!decipherToken) return false;
+  const actual = Buffer.from(request.headers.authorization || '');
+  const expected = Buffer.from(`Bearer ${decipherToken}`);
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
+}
+
+function signedRequestMatches(request, rawBody, pathname) {
+  const timestamp = request.headers['x-resolver-timestamp'];
+  const nonce = request.headers['x-resolver-nonce'];
+  const signature = request.headers['x-resolver-signature'];
+  const valid = verifyInternalSignature({
+    timestamp: typeof timestamp === 'string' ? timestamp : '',
+    nonce: typeof nonce === 'string' ? nonce : '',
+    pathname,
+    rawBody,
+    signature: typeof signature === 'string' ? signature : '',
+  });
+  if (!valid || signatureNonces.has(nonce)) return false;
+  const nowSeconds = Math.floor(Date.now() / 1_000);
+  for (const [seenNonce, seenAt] of signatureNonces) {
+    if (nowSeconds - seenAt > 180) signatureNonces.delete(seenNonce);
+  }
+  signatureNonces.set(nonce, nowSeconds);
+  return true;
+}
+
+function internalRequestAuthorized(request, rawBody, pathname) {
+  return bearerMatches(request) || signedRequestMatches(request, rawBody, pathname);
+}
+
 async function handleDecipher(request, response) {
-  if (decipherToken && request.headers.authorization !== `Bearer ${decipherToken}`) {
+  const parsed = await readJsonBody(request);
+  if (!internalRequestAuthorized(request, parsed.raw, '/api/decipher')) {
     return jsonResponse(response, 401, { error: 'Unauthorized' });
   }
-  const body = await readJsonBody(request);
+  const body = parsed.value;
   const playerId = String(body.playerId ?? '');
   if (playerId && !/^[A-Za-z0-9_-]{6,32}$/.test(playerId)) {
     return jsonResponse(response, 400, { error: 'Invalid playerId' });
@@ -234,10 +270,11 @@ async function handleDecipher(request, response) {
 }
 
 async function handlePoToken(request, response) {
-  if (decipherToken && request.headers.authorization !== `Bearer ${decipherToken}`) {
+  const parsed = await readJsonBody(request);
+  if (!internalRequestAuthorized(request, parsed.raw, '/api/pot')) {
     return jsonResponse(response, 401, { error: 'Unauthorized' });
   }
-  const body = await readJsonBody(request);
+  const body = parsed.value;
   const videoId = String(body.videoId ?? '');
   if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
     return jsonResponse(response, 400, { error: 'Invalid videoId' });

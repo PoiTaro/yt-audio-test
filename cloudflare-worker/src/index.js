@@ -51,6 +51,7 @@ export class RegionalResolver extends DurableObject {
           audioContainer,
           renderDecipherUrl: this.env.RENDER_DECIPHER_URL,
           decipherToken: this.env.DECIPHER_TOKEN,
+          decipherSigningPrivateJwk: this.env.DECIPHER_SIGNING_PRIVATE_JWK,
           range: request.headers.get('Range'),
           cachedResolution,
         });
@@ -93,6 +94,7 @@ export default {
         placementEpoch: env.PLACEMENT_EPOCH || 'v1',
         decipherConfigured: Boolean(env.RENDER_DECIPHER_URL),
         authConfigured: Boolean(env.WORKER_TOKEN),
+        internalSignatureConfigured: Boolean(env.DECIPHER_SIGNING_PRIVATE_JWK),
       });
     }
     if (url.pathname !== '/audio' && url.pathname !== '/video') return json({ error: 'Not found' }, 404);

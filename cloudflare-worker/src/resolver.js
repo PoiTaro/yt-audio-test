@@ -56,6 +56,55 @@ class ResolverError extends Error {
   }
 }
 
+function base64Url(bytes) {
+  let binary = '';
+  for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/u, '');
+}
+
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export async function signedInternalHeaders(urlValue, body, privateJwkValue) {
+  if (!privateJwkValue) {
+    throw new ResolverError(
+      'INTERNAL_AUTH_MISCONFIGURED',
+      '内部API署名鍵が設定されていません。',
+    );
+  }
+  let privateJwk;
+  try {
+    privateJwk = typeof privateJwkValue === 'string'
+      ? JSON.parse(privateJwkValue)
+      : privateJwkValue;
+  } catch {
+    throw new ResolverError('INTERNAL_AUTH_MISCONFIGURED', '内部API署名鍵が不正です。');
+  }
+  const key = await crypto.subtle.importKey(
+    'jwk',
+    privateJwk,
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['sign'],
+  );
+  const url = new URL(urlValue);
+  const timestamp = String(Math.floor(Date.now() / 1_000));
+  const nonce = crypto.randomUUID();
+  const message = `${timestamp}\n${nonce}\n${url.pathname}\n${await sha256Hex(body)}`;
+  const signature = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: 'SHA-256' },
+    key,
+    new TextEncoder().encode(message),
+  );
+  return {
+    'X-Resolver-Timestamp': timestamp,
+    'X-Resolver-Nonce': nonce,
+    'X-Resolver-Signature': base64Url(signature),
+  };
+}
+
 function parseJsonObjectAt(source, start) {
   let depth = 0;
   let inString = false;
@@ -269,17 +318,28 @@ async function fetchInnerTubeResponse(videoId, diagnostics, integrity, mediaType
   return null;
 }
 
-async function fetchPoTokens(videoId, renderDecipherUrl, decipherToken, diagnostics) {
+async function fetchPoTokens(
+  videoId,
+  renderDecipherUrl,
+  decipherToken,
+  decipherSigningPrivateJwk,
+  diagnostics,
+) {
   const poTokenUrl = new URL(renderDecipherUrl);
   poTokenUrl.pathname = '/api/pot';
   poTokenUrl.search = '';
+  const body = JSON.stringify({ videoId });
+  const signatureHeaders = decipherToken
+    ? {}
+    : await signedInternalHeaders(poTokenUrl, body, decipherSigningPrivateJwk);
   const response = await fetch(poTokenUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(decipherToken ? { Authorization: `Bearer ${decipherToken}` } : {}),
+      ...signatureHeaders,
     },
-    body: JSON.stringify({ videoId }),
+    body,
   });
   let result = {};
   try { result = await response.json(); } catch { /* Normalize below. */ }
@@ -333,6 +393,7 @@ export async function resolveAndFetchMedia({
   audioContainer = 'auto',
   renderDecipherUrl,
   decipherToken,
+  decipherSigningPrivateJwk,
   range,
   cachedResolution = null,
 }) {
@@ -340,7 +401,13 @@ export async function resolveAndFetchMedia({
   const diagnostics = { videoId, mediaType };
   let resolution = cachedResolution;
   if (!resolution) {
-    const integrity = await fetchPoTokens(videoId, renderDecipherUrl, decipherToken, diagnostics);
+    const integrity = await fetchPoTokens(
+      videoId,
+      renderDecipherUrl,
+      decipherToken,
+      decipherSigningPrivateJwk,
+      diagnostics,
+    );
     const watch = await fetchWatchResponse(videoId, diagnostics);
     // PO TokenとVisitor IDを付けたInnerTube応答を優先する。watchページ由来の
     // URLは別Visitorへ結び付くことがあり、同じTokenを付けても403になる。
@@ -373,18 +440,27 @@ export async function resolveAndFetchMedia({
       deciphered = { url: format.url, nChanged: false };
       diagnostics.decipher = { status: 200, nChanged: false, bypassed: true };
     } else {
+      const decipherBody = JSON.stringify({
+        ...(playerId ? { playerId } : {}),
+        ...(format.url ? { url: format.url } : {}),
+        ...(format.signatureCipher ? { signatureCipher: format.signatureCipher } : {}),
+        ...(format.cipher ? { cipher: format.cipher } : {}),
+      });
+      const signatureHeaders = decipherToken
+        ? {}
+        : await signedInternalHeaders(
+          renderDecipherUrl,
+          decipherBody,
+          decipherSigningPrivateJwk,
+        );
       const decipherResponse = await fetch(renderDecipherUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(decipherToken ? { Authorization: `Bearer ${decipherToken}` } : {}),
+          ...signatureHeaders,
         },
-        body: JSON.stringify({
-          ...(playerId ? { playerId } : {}),
-          ...(format.url ? { url: format.url } : {}),
-          ...(format.signatureCipher ? { signatureCipher: format.signatureCipher } : {}),
-          ...(format.cipher ? { cipher: format.cipher } : {}),
-        }),
+        body: decipherBody,
       });
       try { deciphered = await decipherResponse.json(); } catch { /* Normalize below. */ }
       diagnostics.decipher = { status: decipherResponse.status, nChanged: deciphered.nChanged ?? null };
