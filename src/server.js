@@ -24,6 +24,7 @@ const generateSessionLocally = process.env.GENERATE_SESSION_LOCALLY === 'true';
 const poTokenMode = process.env.PO_TOKEN_MODE || 'none';
 const sessionTokenUrl = process.env.SESSION_TOKEN_URL || '';
 const runStartupValidation = process.env.RUN_STARTUP_VALIDATION === 'true';
+const decipherToken = process.env.DECIPHER_TOKEN || '';
 const playerCache = new Map();
 
 const state = {
@@ -180,6 +181,9 @@ async function readJsonBody(request, maxBytes = 16_384) {
 }
 
 async function handleDecipher(request, response) {
+  if (decipherToken && request.headers.authorization !== `Bearer ${decipherToken}`) {
+    return jsonResponse(response, 401, { error: 'Unauthorized' });
+  }
   const body = await readJsonBody(request);
   const playerId = String(body.playerId ?? '');
   if (!/^[A-Za-z0-9_-]{6,32}$/.test(playerId)) {

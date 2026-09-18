@@ -90,15 +90,18 @@ YouTube.jsは非公式のInnerTubeクライアントで、YouTubeの仕様変更
 
 ## Render検証サービス
 
-`Dockerfile`でNode.jsとFFmpegを同じコンテナに入れ、起動後に固定3動画を複数のInnerTubeクライアントで自動検証します。任意URLを受け付ける公開APIはありません。`TEST_CLIENTS`環境変数をカンマ区切りで設定すると対象を変更できます。
+現在の`Dockerfile`は、Cloudflareとの分業検証に使う軽量Node.jsサービスです。起動時の重いマトリクス検証は既定で実行しません。`RUN_STARTUP_VALIDATION=true`を明示した場合だけ、固定3動画を複数のInnerTubeクライアントで検証します。`TEST_CLIENTS`環境変数をカンマ区切りで設定すると対象を変更できます。
 
 既定の`SESSION_MODE=dedicated`では、クライアントごとに専用Session、User-Agent、Visitor Dataを作ります。比較用の`SESSION_MODE=override`では、共通WEB Sessionにリクエスト単位のclient指定を適用します。`GENERATE_SESSION_LOCALLY=true`を指定すると、YouTubeからSession dataを取得せずローカル生成する条件も比較できます。
 
 - `/health`: 実行状況
 - `/report`: 期限付きストリームURLを除いた検証結果
+- `POST /api/decipher`: Cloudflare側で取得したGoogleVideo URLの`n`値だけをPlayer JavaScriptで変換
 - `/`: 簡易ステータス画面
 
-RenderではDocker Web Serviceとしてデプロイしてください。`render.yaml`からBlueprintとして作成することもできます。検証はデプロイごとに一度実行され、結果はインスタンスのメモリに保持されます。
+RenderではDocker Web Serviceとしてデプロイしてください。`render.yaml`からBlueprintとして作成することもできます。`RUN_STARTUP_VALIDATION=true`の場合、検証はデプロイごとに一度実行され、結果はインスタンスのメモリに保持されます。
+
+`DECIPHER_TOKEN`を設定すると、`/api/decipher`は同じ値の`Authorization: Bearer ...`を要求します。本番では必ずCloudflare WorkerとRenderの双方に共有Secretとして設定してください。GoogleのCookieやアカウント情報ではありません。
 
 追加の診断用環境変数:
 
@@ -106,6 +109,16 @@ RenderではDocker Web Serviceとしてデプロイしてください。`render.
 - `SESSION_TOKEN_URL=http://127.0.0.1:8080/token`: 同一コンテナのChromium trusted-session generatorからPO TokenとVisitor Dataを取得
 
 これらは検証用です。Render SingaporeではどちらもPlayer段階の`LOGIN_REQUIRED`を解消できませんでした。
+
+## Cloudflare Edge分業プローブ
+
+`scripts/cloudflare-playground-probe.mjs`は、アカウント不要のCloudflare Workers Playgroundに一時Workerを作成し、watch HTML取得、Renderでの`n`変換、同じCloudflare出口からのGoogleVideo Range取得を検証します。
+
+```powershell
+node scripts/cloudflare-playground-probe.mjs VIDEO_ID https://YOUR-RENDER-SERVICE/api/decipher 1 OPTIONAL_SHARED_TOKEN
+```
+
+固定公開動画では、Cloudflare watch応答が`OK`だった試行はすべてHTTP 206の音声取得まで完走しました。ただしCloudflare出口によって`LOGIN_REQUIRED`または429になる試行があり、同じWorker内の再試行やYouTubeホスト・InnerTubeクライアント変更では解消しませんでした。詳しい実測値は`VALIDATION.md`に記録しています。
 
 ## ブラウザ側取得の実証
 
@@ -118,3 +131,5 @@ node browser-probe/server.js
 拡張を入れたブラウザで`http://127.0.0.1:18181`を開くと、YouTube.jsのブラウザ版が固定公開動画のaudio-only URLをブラウザ内で解決し、先頭8KiBを拡張経由で取得します。Node側は静的ファイル配信と結果受信だけで、YouTubeへの解決要求は行いません。実測では無改造の`ytc-bridge` 1.2.0と`ANDROID_VR`でplayability `OK`、HTTP 206、8192 bytes、`audio/mp4`、itag 140として成功しました。
 
 本番統合では、期限付きURLをRenderへ送るのではなく、拡張が音声バイトを取得してRenderへアップロードします。これによりYouTube/GoogleVideoへの接続はユーザー側ネットワークで完結し、RenderはMR処理だけを担当できます。
+
+ただし、この方式はブラウザ拡張を導入できないiPhoneユーザーや「URLを貼るだけ」という本アプリの製品要件には適合しません。現在は比較対象となる技術実証として残しています。

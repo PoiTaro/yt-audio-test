@@ -114,3 +114,19 @@ Renderだけの問題ではなく、未認証のデータセンター実行環�
 | format | itag 140 / `mp4a.40.2` |
 
 この結果から、公開RenderサーバーでYouTube取得を完結させるのではなく、ユーザー側ブラウザ拡張でInnerTube解決・音声取得し、取得済み音声データだけをRenderのMR処理APIへアップロードする構成が実行可能な突破口です。期限付きURLだけをRenderへ渡す方式では、再びRender IPからGoogleVideoへアクセスするため効果がありません。
+
+## Cloudflare Edge + Render変換API検証
+
+エンドユーザーに拡張機能やGoogleログインを要求しないサーバー側経路として、Cloudflare Workers PlaygroundとRenderを分業させました。
+
+1. Cloudflare EdgeがYouTube watch HTMLを取得し、audio-only formatと同じHTMLのPlayer IDを抽出
+2. RenderはPlayer JavaScriptの`n`変換だけを実行してURLを返却
+3. Cloudflare Edgeが同じ出口から変換後GoogleVideo URLをRange取得
+
+Googleアカウント、Cookie、OAuth、外部ダウンロードAPI、yt-dlpは使用していません。Renderへ渡すのは期限付きGoogleVideo URLとPlayer IDだけで、音声取得はURLを発行されたCloudflare側から行います。
+
+固定公開動画`jNQXAC9IVRw`の初期試験では、10回中6回で全工程に成功しました。watch応答が`OK`だった6回はすべて、Renderで`nChanged=true`、GoogleVideoでHTTP 206、`audio/mp4` 309,288 bytesまで成功しました。変換前URLは同じCloudflare EdgeからでもHTTP 403だったため、`n`変換が実際に効いています。
+
+一方、残り4回はCloudflareの出口単位でwatch応答が`LOGIN_REQUIRED`になりました。同一Worker内で5回再試行、`www`・`m`・embed・`youtube-nocookie`・musicのホスト切替、`ANDROID_VR`・`IOS`・埋め込み系InnerTubeへのフォールバックを行っても、その出口では改善しませんでした。3つの匿名Preview Workerを同時実行した試験も結果が完全に相関し、単純な複製では別の出口になりませんでした。連続負荷後にはHTTP 429も確認しています。
+
+したがって、この構成は「アカウントなしでサーバー側だけから音声を取れる」ことの実証には成功しましたが、現時点の単一Cloudflare Workerだけでは成功率が安定せず、そのまま本番採用できる段階ではありません。次の実装候補は、Cloudflareの異なる配置を持つ複数の自前Worker/Durable Objectを用意して出口を分散し、成功した経路だけを採用する方法です。これも利用者の操作はURL貼り付けだけで、Googleアカウントは不要です。
