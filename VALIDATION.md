@@ -172,3 +172,9 @@ Renderへ最新版を手動デプロイし、Cloudflareアカウントの恒久W
 固定公開動画`jNQXAC9IVRw`に対して、恒久Workerの`/audio`へ64KiBのRangeリクエストを送信しました。`apac-se`が採用され、HTTP 206、`audio/mp4`、itag 140、65,536 bytesの取得に成功しました。
 
 これにより、一時WorkerやQuick Tunnelに依存しない恒久構成でも、URL入力から地域選択、Player変換、同地域GoogleVideo取得までの全経路が動作することを確認しました。
+
+## Python MR除去アプリ統合
+
+`C:\Users\takes\Desktop\code\MR除去\app.py`へ、地域Resolverの音声レスポンスをFFmpegの標準入力へ直接ストリームする経路を追加しました。ブラウザUIと入力操作は変更せず、バックエンドに`YT_AUDIO_WORKER_TOKEN`が設定されている場合だけ地域Resolverを優先します。失敗時は既存のyt-dlp経路へ戻ります。
+
+恒久WorkerとRender変換APIを使った統合試験では、19.06秒の検証動画から3,362,894 bytesのWAVを生成しました。ffprobe結果はPCM 16-bit、44.1kHz、2chで、MR除去処理へそのまま渡せる形式でした。検証用WAVは確認後に削除しました。
