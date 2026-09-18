@@ -5,3 +5,4 @@ output*/
 .tools/
 *.log
 __pycache__/
+mr-backend/web_media/
