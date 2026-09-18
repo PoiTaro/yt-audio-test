@@ -5,7 +5,10 @@ import process from 'node:process';
 import { buildSummary, createResolver, extractVideoId, probeClient } from './core.js';
 
 const port = Number(process.env.PORT || 10000);
-const clients = ['ANDROID_VR', 'IOS'];
+const clients = (process.env.TEST_CLIENTS || 'ANDROID_VR,IOS,WEB,MWEB,ANDROID,TV')
+  .split(',')
+  .map((value) => value.trim().toUpperCase())
+  .filter(Boolean);
 const inputs = (process.env.TEST_VIDEO_IDS || 'M7lc1UVf-VE,aqz-KE-bpKQ,jNQXAC9IVRw')
   .split(',')
   .map((value) => value.trim())
@@ -65,7 +68,7 @@ function htmlResponse(response) {
 <style>body{font-family:system-ui,sans-serif;max-width:760px;margin:48px auto;padding:0 20px;line-height:1.65}code{background:#eee;padding:.2em .4em;border-radius:4px}.ok{color:#087f23}.run{color:#9a6700}.ng{color:#c62828}</style></head>
 <body><h1>YouTube Audio Stream Probe</h1>
 <p>Status: <strong class="${state.status === 'complete' ? 'ok' : state.status === 'error' ? 'ng' : 'run'}">${state.status}</strong></p>
-<p>RenderのデータセンターIPから、固定3動画をANDROID_VR／IOSで検証します。Cookie・ログイン・PO Token・yt-dlpは使用しません。</p>
+<p>RenderのデータセンターIPから、固定3動画を複数のInnerTubeクライアントで検証します。Cookie・ログイン・PO Token・yt-dlpは使用しません。</p>
 <ul><li><a href="/health">/health</a></li><li><a href="/report">/report</a></li></ul>
 </body></html>`;
   response.writeHead(200, {

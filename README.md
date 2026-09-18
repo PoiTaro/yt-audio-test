@@ -90,7 +90,7 @@ YouTube.jsは非公式のInnerTubeクライアントで、YouTubeの仕様変更
 
 ## Render検証サービス
 
-`Dockerfile`でNode.jsとFFmpegを同じコンテナに入れ、起動後に固定3動画を`ANDROID_VR`と`IOS`で自動検証します。任意URLを受け付ける公開APIはありません。
+`Dockerfile`でNode.jsとFFmpegを同じコンテナに入れ、起動後に固定3動画を`ANDROID_VR`、`IOS`、`WEB`、`MWEB`、`ANDROID`、`TV`で自動検証します。任意URLを受け付ける公開APIはありません。`TEST_CLIENTS`環境変数をカンマ区切りで設定すると対象を変更できます。
 
 - `/health`: 実行状況
 - `/report`: 期限付きストリームURLを除いた検証結果
