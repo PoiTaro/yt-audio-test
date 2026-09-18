@@ -10,6 +10,8 @@ import threading
 import time
 import uuid
 import math
+import gc
+import ctypes
 from collections import defaultdict, deque
 from pathlib import Path
 from urllib import error as urlerror
@@ -328,6 +330,16 @@ def _media_path(filename: str) -> Path:
 def _normalise(samples: np.ndarray) -> np.ndarray:
     peak = float(np.max(np.abs(samples))) if samples.size else 0.0
     return samples / peak if peak > 1e-12 else samples
+
+
+def _trim_process_memory() -> None:
+    """大きな解析行列を解放し、LinuxではヒープをOSへ返す。"""
+    gc.collect()
+    if os.name == "posix":
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except (AttributeError, OSError):
+            pass
 
 
 def _fine_alignment_features(samples: np.ndarray, sample_rate: int, hop_length: int) -> np.ndarray:
@@ -952,10 +964,9 @@ def _extract_vocals_chunked(
     karaoke = np.asarray(karaoke, dtype=np.float32)
     natural_output = np.zeros(output_length, dtype=np.float32)
     enhanced_output = np.zeros(output_length, dtype=np.float32)
-    overlap_weight = np.zeros(output_length, dtype=np.float32)
-    # 6秒ごとに処理し、前後0.75秒をクロスフェードする。
-    # 4分音源でもピークメモリに十分な余白を残しつつ、継ぎ目を隠す。
-    chunk_samples = 6 * SAMPLE_RATE
+    # 3秒ごとに処理し、前後0.75秒をクロスフェードする。
+    # 長さと同じウェイト配列は持たず、直前区間とその場で合成する。
+    chunk_samples = 3 * SAMPLE_RATE
     overlap_samples = 3 * SAMPLE_RATE // 4
     step_samples = chunk_samples - overlap_samples
     starts = list(range(0, output_length, step_samples))
@@ -967,6 +978,7 @@ def _extract_vocals_chunked(
     original_map_times = karaoke_map_times = map_confidence = None
     if time_map is not None:
         original_map_times, karaoke_map_times, map_confidence = time_map
+    filled_until = 0
 
     for start in starts:
         end = min(output_length, start + chunk_samples)
@@ -1153,21 +1165,25 @@ def _extract_vocals_chunked(
             enhanced_chunk = np.pad(
                 enhanced_chunk, (0, segment_length - len(enhanced_chunk))
             )
-        weight = np.ones(segment_length, dtype=np.float32)
-        fade_length = min(overlap_samples, segment_length)
-        if start > 0:
-            fade = np.linspace(0, np.pi / 2, fade_length, dtype=np.float32)
-            weight[:fade_length] *= np.sin(fade) ** 2
-        if end < output_length:
-            fade = np.linspace(0, np.pi / 2, fade_length, dtype=np.float32)
-            weight[-fade_length:] *= np.cos(fade) ** 2
-        natural_output[start:end] += natural_chunk * weight
-        enhanced_output[start:end] += enhanced_chunk * weight
-        overlap_weight[start:end] += weight
+        overlap_length = max(0, min(filled_until, end) - start)
+        if overlap_length:
+            fade = np.linspace(0, np.pi / 2, overlap_length, dtype=np.float32)
+            fade_in = np.sin(fade) ** 2
+            fade_out = np.cos(fade) ** 2
+            natural_output[start : start + overlap_length] = (
+                natural_output[start : start + overlap_length] * fade_out
+                + natural_chunk[:overlap_length] * fade_in
+            )
+            enhanced_output[start : start + overlap_length] = (
+                enhanced_output[start : start + overlap_length] * fade_out
+                + enhanced_chunk[:overlap_length] * fade_in
+            )
+        remainder_start = start + overlap_length
+        if remainder_start < end:
+            natural_output[remainder_start:end] = natural_chunk[overlap_length:]
+            enhanced_output[remainder_start:end] = enhanced_chunk[overlap_length:]
+        filled_until = max(filled_until, end)
 
-    usable_weight = np.maximum(overlap_weight, np.float32(1e-7))
-    natural_output /= usable_weight
-    enhanced_output /= usable_weight
     return (
         _normalise(natural_output).astype(np.float32, copy=False),
         _normalise(enhanced_output).astype(np.float32, copy=False),
@@ -1403,6 +1419,7 @@ def _extract(
     original, karaoke, sample_rate, offset, time_map = align_audio(
         _media_path(original_name), _media_path(karaoke_name)
     )
+    _trim_process_memory()
     if progress:
         progress(82, "生歌の差分を抽出しています")
     natural_vocals, enhanced_vocals = extract_vocals(
