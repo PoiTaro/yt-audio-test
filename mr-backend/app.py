@@ -68,8 +68,9 @@ def _integer_setting(name: str, default: int, minimum: int, maximum: int) -> int
     return max(minimum, min(maximum, value))
 
 
-MAX_CONTENT_MB = _integer_setting("MAX_CONTENT_MB", 80, 25, 200)
-MAX_MEDIA_DURATION_SECONDS = _integer_setting("MAX_MEDIA_DURATION_SECONDS", 4 * 60, 60, 15 * 60)
+# Render Freeのメモリ上限を超えない絶対上限。古い環境変数が残っていても緩和しない。
+MAX_CONTENT_MB = _integer_setting("MAX_CONTENT_MB", 80, 25, 80)
+MAX_MEDIA_DURATION_SECONDS = _integer_setting("MAX_MEDIA_DURATION_SECONDS", 4 * 60, 60, 4 * 60)
 MEDIA_TTL_SECONDS = _integer_setting("MEDIA_TTL_SECONDS", 30 * 60, 5 * 60, 24 * 60 * 60)
 # Render Freeの512 MB内で解析行列が重ならないよう、処理本体は常に1件だけ実行する。
 MAX_CONCURRENT_JOBS = 1
