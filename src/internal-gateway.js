@@ -7,17 +7,22 @@ import { verifyInternalSignature } from './internal-auth.js';
 
 const host = process.env.INTERNAL_GATEWAY_HOST || '127.0.0.1';
 const port = Number(process.env.INTERNAL_GATEWAY_PORT || 10001);
-const helperTimeoutMs = Number(process.env.INTERNAL_HELPER_TIMEOUT_MS || 45_000);
-const maxQueue = Number(process.env.INTERNAL_HELPER_MAX_QUEUE || 2);
+const helperTimeoutMs = Number(process.env.INTERNAL_HELPER_TIMEOUT_MS || 75_000);
+const maxQueue = Number(process.env.INTERNAL_HELPER_MAX_QUEUE || 8);
 const poCacheTtlMs = Number(process.env.INTERNAL_PO_CACHE_TTL_MS || 240_000);
 const helperMaxOldSpaceMb = Number(process.env.INTERNAL_HELPER_MAX_OLD_SPACE_MB || 224);
 const bearerToken = process.env.DECIPHER_TOKEN || '';
 const cliPath = fileURLToPath(new URL('./internal-cli.js', import.meta.url));
+const decipherWorkerPath = fileURLToPath(new URL('./decipher-worker.js', import.meta.url));
 const signatureNonces = new Map();
 const pending = [];
 const poTokenCache = new Map();
 const poTokenInFlight = new Map();
 let active = false;
+let decipherWorker = null;
+let decipherWorkerBuffer = '';
+let decipherWorkerNextId = 1;
+const decipherWorkerRequests = new Map();
 
 function jsonResponse(response, statusCode, value) {
   const body = `${JSON.stringify(value)}\n`;
@@ -111,11 +116,91 @@ function runChild(operation, rawBody) {
   });
 }
 
+function rejectDecipherWorkerRequests(error) {
+  for (const request of decipherWorkerRequests.values()) {
+    clearTimeout(request.timer);
+    request.reject(error);
+  }
+  decipherWorkerRequests.clear();
+}
+
+function ensureDecipherWorker() {
+  if (decipherWorker && !decipherWorker.killed) return decipherWorker;
+  const child = spawn(
+    process.execPath,
+    [`--max-old-space-size=${helperMaxOldSpaceMb}`, decipherWorkerPath],
+    { env: { ...process.env, NODE_ENV: 'production' }, stdio: ['pipe', 'pipe', 'pipe'] },
+  );
+  decipherWorker = child;
+  decipherWorkerBuffer = '';
+  child.stdout.on('data', (chunk) => {
+    decipherWorkerBuffer += chunk.toString('utf8');
+    let newline = decipherWorkerBuffer.indexOf('\n');
+    while (newline >= 0) {
+      const line = decipherWorkerBuffer.slice(0, newline).trim();
+      decipherWorkerBuffer = decipherWorkerBuffer.slice(newline + 1);
+      if (line) {
+        try {
+          const message = JSON.parse(line);
+          const request = decipherWorkerRequests.get(message.id);
+          if (request) {
+            decipherWorkerRequests.delete(message.id);
+            clearTimeout(request.timer);
+            if (message.ok) request.resolve(message.result);
+            else request.reject(Object.assign(new Error(message.error || 'Internal decipher failed'), {
+              statusCode: Number(message.statusCode) || 502,
+            }));
+          }
+        } catch (error) {
+          console.error('Invalid decipher worker response', error?.message || error);
+        }
+      }
+      newline = decipherWorkerBuffer.indexOf('\n');
+    }
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => {
+    stderr = `${stderr}${chunk.toString('utf8')}`.slice(-4_096);
+  });
+  child.on('error', (error) => {
+    rejectDecipherWorkerRequests(error);
+  });
+  child.on('close', (code) => {
+    if (decipherWorker === child) decipherWorker = null;
+    decipherWorkerBuffer = '';
+    if (decipherWorkerRequests.size) {
+      if (stderr) console.error('Decipher worker stopped', stderr);
+      rejectDecipherWorkerRequests(Object.assign(
+        new Error(`Internal decipher worker stopped (${code ?? 'unknown'})`),
+        { statusCode: 502 },
+      ));
+    }
+  });
+  return child;
+}
+
+function runDecipherWorker(rawBody) {
+  return new Promise((resolve, reject) => {
+    const child = ensureDecipherWorker();
+    const id = decipherWorkerNextId++;
+    const timer = setTimeout(() => {
+      decipherWorkerRequests.delete(id);
+      child.kill('SIGKILL');
+      reject(Object.assign(new Error('Internal decipher helper timed out'), { statusCode: 504 }));
+    }, helperTimeoutMs);
+    decipherWorkerRequests.set(id, { resolve, reject, timer });
+    child.stdin.write(`${JSON.stringify({ id, body: JSON.parse(rawBody) })}\n`);
+  });
+}
+
 function drainQueue() {
   if (active || pending.length === 0) return;
   active = true;
   const job = pending.shift();
-  runChild(job.operation, job.rawBody)
+  const operation = job.operation === 'decipher'
+    ? runDecipherWorker(job.rawBody)
+    : runChild(job.operation, job.rawBody);
+  operation
     .then(job.resolve, job.reject)
     .finally(() => {
       active = false;
@@ -169,6 +254,7 @@ const server = http.createServer(async (request, response) => {
         poTokenCacheEntries: poTokenCache.size,
         poTokenInFlight: poTokenInFlight.size,
         helperMaxOldSpaceMb,
+        decipherWorkerActive: Boolean(decipherWorker && !decipherWorker.killed),
       });
     }
     const operations = new Map([
@@ -208,3 +294,12 @@ const server = http.createServer(async (request, response) => {
 server.listen(port, host, () => {
   console.log(`Internal Node gateway listening on http://${host}:${port}`);
 });
+
+function shutdown() {
+  decipherWorker?.kill('SIGTERM');
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 5_000).unref();
+}
+
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

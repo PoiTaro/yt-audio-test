@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const cliPath = fileURLToPath(new URL('../src/internal-cli.js', import.meta.url));
 const gatewayPath = fileURLToPath(new URL('../src/internal-gateway.js', import.meta.url));
+const decipherWorkerPath = fileURLToPath(new URL('../src/decipher-worker.js', import.meta.url));
 
 function runCli(operation, input) {
   return new Promise((resolve, reject) => {
@@ -23,6 +24,27 @@ test('one-shot helper rejects invalid decipher input before network access', asy
   const result = await runCli('decipher', {});
   assert.equal(result.code, 1);
   assert.deepEqual(JSON.parse(result.stdout), {
+    ok: false,
+    statusCode: 400,
+    error: 'url, signatureCipher, or cipher is required',
+  });
+});
+
+test('burst decipher worker returns structured validation errors', async () => {
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [decipherWorkerPath], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString('utf8');
+      if (stdout.includes('\n')) child.stdin.end();
+    });
+    child.on('error', reject);
+    child.on('close', (code) => resolve({ code, stdout }));
+    child.stdin.write(`${JSON.stringify({ id: 7, body: {} })}\n`);
+  });
+  assert.equal(result.code, 0);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    id: 7,
     ok: false,
     statusCode: 400,
     error: 'url, signatureCipher, or cipher is required',
@@ -52,6 +74,7 @@ test('lightweight gateway is healthy and rejects unsigned work', async () => {
     assert.equal(healthPayload.status, 'ok');
     assert.equal(healthPayload.poTokenCacheEntries, 0);
     assert.equal(healthPayload.poTokenInFlight, 0);
+    assert.equal(healthPayload.decipherWorkerActive, false);
     const unauthorized = await fetch(`http://127.0.0.1:${port}/api/pot`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
