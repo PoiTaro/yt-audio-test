@@ -59,9 +59,14 @@ const postBlurValue = document.getElementById('postBlurValue');
 let audioCtx = null;
 let videoSource = null;
 let vocalBufferSource = null;
+let originalBufferSource = null;
 let videoGain = null;
 let vocalGain = null;
+let originalGain = null;
 let vocalBuffer = null;
+let originalBuffer = null;
+let vocalControllerSource = null;
+let vocalControllerGain = null;
 let storedVideoAudioFilename = null;
 let storedVideoFilename = null;
 let storedKaraokeFilename = null;
@@ -76,8 +81,11 @@ let audioSyncFrame = null;
 let videoSyncFrame = null;
 let vocalStartContextTime = 0;
 let vocalStartBufferOffset = 0;
+let originalStartContextTime = 0;
+let originalStartBufferOffset = 0;
 let lastVideoSyncCheck = 0;
 let videoMixStartRequest = 0;
+let activeMixMaster = null;
 let videoHomeParent = null;
 let videoHomeNextSibling = null;
 let backendWarmPromise = null;
@@ -555,9 +563,17 @@ function initialiseAudio() {
   if (!videoSource) {
     videoSource = audioCtx.createMediaElementSource(videoEl);
     videoGain = audioCtx.createGain();
-    videoGain.gain.setValueAtTime(1 - Number(mixSlider.value), audioCtx.currentTime);
     videoSource.connect(videoGain).connect(audioCtx.destination);
   }
+  if (!vocalControllerSource) {
+    // 音声モードの<audio>はシークバーと時計だけに使う。実音声は
+    // 2本とも同じAudioContextで鳴らし、iOS固有の出力遅延差をなくす。
+    vocalControllerSource = audioCtx.createMediaElementSource(vocalAudio);
+    vocalControllerGain = audioCtx.createGain();
+    vocalControllerGain.gain.setValueAtTime(0, audioCtx.currentTime);
+    vocalControllerSource.connect(vocalControllerGain).connect(audioCtx.destination);
+  }
+  applyMixLevels();
 }
 
 async function handleServerResponse(payload) {
@@ -565,6 +581,9 @@ async function handleServerResponse(payload) {
     log(`処理できませんでした: ${payload.error}`, 'error');
     return false;
   }
+  stopVocal();
+  vocalBuffer = null;
+  originalBuffer = null;
   storeVocalVariants(payload, true);
   const activeVocalUrl = selectedVocalUrl();
   if (activeVocalUrl) {
@@ -599,10 +618,25 @@ async function handleServerResponse(payload) {
   initialiseAudio();
   if (activeVocalUrl) {
     log('抽出結果を読み込んでいます。', 'working');
-    const response = await fetch(activeVocalUrl);
-    vocalBuffer = await audioCtx.decodeAudioData(await response.arrayBuffer());
+    const originalUrl = apiUrl(payload.video_audio_url || payload.video_url);
+    const [vocalResponse, originalResponse] = await Promise.all([
+      fetch(activeVocalUrl),
+      fetch(originalUrl),
+    ]);
+    if (!vocalResponse.ok || !originalResponse.ok) {
+      throw new Error('同期再生用の音声を読み込めませんでした。');
+    }
+    const [vocalBytes, originalBytes] = await Promise.all([
+      vocalResponse.arrayBuffer(),
+      originalResponse.arrayBuffer(),
+    ]);
+    [vocalBuffer, originalBuffer] = await Promise.all([
+      audioCtx.decodeAudioData(vocalBytes),
+      audioCtx.decodeAudioData(originalBytes),
+    ]);
     stopVocal();
     createVocalSource();
+    applyMixLevels();
     reextractBtn.disabled = false;
     resultNote.textContent = payload.preview_is_audio_only
       ? '映像は取得できなかったため、音声プレビューで抽出した差分を確認できます。'
@@ -610,6 +644,8 @@ async function handleServerResponse(payload) {
     log('抽出が完了しました。生歌の差分を再生して確認してください。', 'success');
   } else {
     vocalBuffer = null;
+    originalBuffer = null;
+    applyMixLevels();
     reextractBtn.disabled = true;
     resultNote.textContent = '比較用のMV・公式音源を追加すると、ここで生歌の差分を確認できます。';
     log('読み込みが完了しました。比較用のMV・公式音源を追加すると生歌の差分を抽出できます。', 'idle');
@@ -617,42 +653,115 @@ async function handleServerResponse(payload) {
   return true;
 }
 
+function disposeBufferSources() {
+  for (const source of [vocalBufferSource, originalBufferSource]) {
+    if (!source) continue;
+    try { source.stop(); } catch (_) { /* Already stopped. */ }
+    try { source.disconnect(); } catch (_) { /* Already disconnected. */ }
+  }
+  vocalBufferSource = null;
+  originalBufferSource = null;
+  vocalGain = null;
+  originalGain = null;
+}
+
 function stopVocal() {
   videoMixStartRequest += 1;
   if (videoSyncFrame) cancelAnimationFrame(videoSyncFrame);
+  if (audioSyncFrame) cancelAnimationFrame(audioSyncFrame);
   videoSyncFrame = null;
-  if (!vocalBufferSource) return;
-  try { vocalBufferSource.stop(); } catch (_) { /* Already stopped. */ }
-  vocalBufferSource.disconnect();
-  vocalBufferSource = null;
+  audioSyncFrame = null;
+  activeMixMaster = null;
+  disposeBufferSources();
 }
 
-function createVocalSource() {
-  if (!audioCtx || !vocalBuffer) return;
-  stopVocal();
+function applyMixLevels() {
+  const value = Number(mixSlider.value);
+  const synchronizedMixReady = Boolean(vocalBuffer && originalBuffer);
+  if (vocalGain) vocalGain.gain.setValueAtTime(value, audioCtx.currentTime);
+  if (originalGain) originalGain.gain.setValueAtTime(1 - value, audioCtx.currentTime);
+  // 同期バッファを使う間は、動画要素自身の音声を二重に鳴らさない。
+  if (videoGain) {
+    videoGain.gain.setValueAtTime(
+      synchronizedMixReady ? 0 : 1 - value,
+      audioCtx.currentTime,
+    );
+  }
+}
+
+function createVocalSource(rate = 1) {
+  if (!audioCtx || !vocalBuffer || !originalBuffer) return false;
+  disposeBufferSources();
   vocalBufferSource = audioCtx.createBufferSource();
+  originalBufferSource = audioCtx.createBufferSource();
   vocalBufferSource.buffer = vocalBuffer;
-  vocalBufferSource.playbackRate.value = videoEl.playbackRate || 1;
+  originalBufferSource.buffer = originalBuffer;
+  vocalBufferSource.playbackRate.value = rate;
+  originalBufferSource.playbackRate.value = rate;
   vocalGain = audioCtx.createGain();
-  vocalGain.gain.setValueAtTime(Number(mixSlider.value), audioCtx.currentTime);
+  originalGain = audioCtx.createGain();
   vocalBufferSource.connect(vocalGain).connect(audioCtx.destination);
+  originalBufferSource.connect(originalGain).connect(audioCtx.destination);
+  applyMixLevels();
+  return true;
 }
 
-function startVocalForVideo() {
-  if (!audioCtx || !vocalBuffer || videoEl.paused) return;
-  createVocalSource();
-  const rate = videoEl.playbackRate || 1;
-  const targetOffset = videoEl.currentTime - sourceTimelineOffset();
-  if (targetOffset >= vocalBuffer.duration) {
+function scheduleBufferSource(source, desiredOffset, contextStart, rate) {
+  let startTime = contextStart;
+  let bufferOffset = desiredOffset;
+  if (bufferOffset < 0) {
+    startTime += -bufferOffset / rate;
+    bufferOffset = 0;
+  }
+  if (bufferOffset >= source.buffer.duration) return null;
+  source.start(startTime, bufferOffset);
+  return { startTime, bufferOffset };
+}
+
+function startSynchronizedMix(master) {
+  const media = master === 'video' ? videoEl : vocalAudio;
+  if (!audioCtx || !vocalBuffer || !originalBuffer || media.paused) return;
+  const rate = media.playbackRate || 1;
+  if (!createVocalSource(rate)) return;
+  // 両バッファを同じAudioContext時刻へ予約する。40ms先を使うことで、
+  // iOSでも2本のstart()が必ず同じレンダー量子に入る。
+  const contextStart = audioCtx.currentTime + 0.04;
+  const projectedMasterTime = media.currentTime + 0.04 * rate;
+  const timelineOffset = sourceTimelineOffset();
+  const vocalOffset = master === 'video'
+    ? projectedMasterTime - timelineOffset
+    : projectedMasterTime;
+  const originalOffset = master === 'video'
+    ? projectedMasterTime
+    : projectedMasterTime + timelineOffset;
+  const vocalTiming = scheduleBufferSource(
+    vocalBufferSource,
+    vocalOffset,
+    contextStart,
+    rate,
+  );
+  const originalTiming = scheduleBufferSource(
+    originalBufferSource,
+    originalOffset,
+    contextStart,
+    rate,
+  );
+  if (!originalTiming) {
     stopVocal();
     return;
   }
-  const delay = targetOffset < 0 ? -targetOffset / rate : 0;
-  vocalStartContextTime = audioCtx.currentTime + delay;
-  vocalStartBufferOffset = Math.max(0, targetOffset);
-  vocalBufferSource.start(vocalStartContextTime, vocalStartBufferOffset);
+  vocalStartContextTime = vocalTiming?.startTime ?? Infinity;
+  vocalStartBufferOffset = vocalTiming?.bufferOffset ?? 0;
+  originalStartContextTime = originalTiming.startTime;
+  originalStartBufferOffset = originalTiming.bufferOffset;
+  activeMixMaster = master;
   lastVideoSyncCheck = performance.now();
-  monitorVideoSync();
+  if (master === 'video') monitorVideoSync();
+  else monitorAudioSync();
+}
+
+function startVocalForVideo() {
+  startSynchronizedMix('video');
 }
 
 async function startVideoMixWhenReady() {
@@ -664,17 +773,59 @@ async function startVideoMixWhenReady() {
     || videoEl.paused
     || videoEl.readyState < HTMLMediaElement.HAVE_CURRENT_DATA
     || !vocalBuffer
+    || !originalBuffer
   ) return;
   startVocalForVideo();
 }
 
+async function startAudioMixWhenReady() {
+  const request = ++videoMixStartRequest;
+  initialiseAudio();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+  if (
+    request !== videoMixStartRequest
+    || vocalAudio.paused
+    || !vocalBuffer
+    || !originalBuffer
+  ) return;
+  startSynchronizedMix('audio');
+}
+
+function sourcePosition(startTime, bufferOffset, rate) {
+  if (!Number.isFinite(startTime) || audioCtx.currentTime < startTime) return null;
+  return bufferOffset + (audioCtx.currentTime - startTime) * rate;
+}
+
+function mixNeedsResync(master) {
+  const media = master === 'video' ? videoEl : vocalAudio;
+  const rate = media.playbackRate || 1;
+  const timelineOffset = sourceTimelineOffset();
+  const expectedVocal = master === 'video'
+    ? media.currentTime - timelineOffset
+    : media.currentTime;
+  const expectedOriginal = master === 'video'
+    ? media.currentTime
+    : media.currentTime + timelineOffset;
+  const actualVocal = sourcePosition(
+    vocalStartContextTime,
+    vocalStartBufferOffset,
+    rate,
+  );
+  const actualOriginal = sourcePosition(
+    originalStartContextTime,
+    originalStartBufferOffset,
+    rate,
+  );
+  return (
+    (expectedVocal >= 0 && actualVocal !== null && Math.abs(actualVocal - expectedVocal) > 0.045)
+    || (actualOriginal !== null && Math.abs(actualOriginal - expectedOriginal) > 0.045)
+  );
+}
+
 function monitorVideoSync(timestamp = performance.now()) {
-  if (videoEl.paused || !vocalBufferSource || !vocalBuffer) return;
-  if (timestamp - lastVideoSyncCheck >= 180 && audioCtx.currentTime >= vocalStartContextTime) {
-    const actualOffset = vocalStartBufferOffset
-      + (audioCtx.currentTime - vocalStartContextTime) * (videoEl.playbackRate || 1);
-    const expectedOffset = videoEl.currentTime - sourceTimelineOffset();
-    if (expectedOffset >= 0 && Math.abs(actualOffset - expectedOffset) > 0.045) {
+  if (videoEl.paused || activeMixMaster !== 'video' || !originalBufferSource) return;
+  if (timestamp - lastVideoSyncCheck >= 180) {
+    if (mixNeedsResync('video')) {
       startVocalForVideo();
       return;
     }
@@ -686,40 +837,18 @@ function monitorVideoSync(timestamp = performance.now()) {
 function stopAudioSync() {
   if (audioSyncFrame) cancelAnimationFrame(audioSyncFrame);
   audioSyncFrame = null;
-  originalAudio.playbackRate = vocalAudio.playbackRate || 1;
 }
 
-function syncOriginalAudio(force = false) {
-  // currentTime の変更は非同期シークになる。シーク中に毎フレーム
-  // currentTime を設定し直すと完了が先延ばしになり、STAGE 側だけが
-  // 遅れて聞こえるため、進行中のシークは必ず完了させる。
-  if (originalAudio.seeking || originalAudio.readyState === 0) return;
-  const target = Math.min(
-    Math.max(0, vocalAudio.currentTime + sourceTimelineOffset()),
-    Number.isFinite(originalAudio.duration) ? originalAudio.duration : Infinity,
-  );
-  const drift = target - originalAudio.currentTime;
-  if ((force && Math.abs(drift) > 0.012) || Math.abs(drift) > 0.35) {
-    originalAudio.currentTime = target;
-    originalAudio.playbackRate = vocalAudio.playbackRate || 1;
-  } else if (Math.abs(drift) > 0.012) {
-    // 小さなズレは再シークせず、短時間の速度補正で静かに追いつかせる。
-    const correction = Math.max(0.94, Math.min(1.06, 1 + drift * 0.6));
-    originalAudio.playbackRate = (vocalAudio.playbackRate || 1) * correction;
-  } else {
-    originalAudio.playbackRate = vocalAudio.playbackRate || 1;
-  }
-}
-
-function monitorAudioSync() {
+function monitorAudioSync(timestamp = performance.now()) {
   audioSyncFrame = null;
-  if (vocalAudio.paused) return;
-  syncOriginalAudio();
-  audioSyncFrame = requestAnimationFrame(monitorAudioSync);
-}
-
-function startAudioSyncMonitor() {
-  if (audioSyncFrame) cancelAnimationFrame(audioSyncFrame);
+  if (vocalAudio.paused || activeMixMaster !== 'audio' || !originalBufferSource) return;
+  if (timestamp - lastVideoSyncCheck >= 180) {
+    if (mixNeedsResync('audio')) {
+      startSynchronizedMix('audio');
+      return;
+    }
+    lastVideoSyncCheck = timestamp;
+  }
   audioSyncFrame = requestAnimationFrame(monitorAudioSync);
 }
 
@@ -740,30 +869,28 @@ videoEl.addEventListener('waiting', stopVocal);
 videoEl.addEventListener('stalled', stopVocal);
 vocalAudio.addEventListener('play', () => {
   videoEl.pause();
+  originalAudio.pause();
   stopVocal();
-  stopAudioSync();
-  syncOriginalAudio(true);
-  originalAudio.playbackRate = vocalAudio.playbackRate;
-  originalAudio.play().then(() => {
-    // play() の待機中に進んだ分は、再シークせず速度補正へ渡す。
-    syncOriginalAudio();
-  }).catch(() => {
-    log('ステージ音源を同時再生できませんでした。もう一度再生してください。', 'error');
+  startAudioMixWhenReady().catch((error) => {
+    console.error(error);
+    log('同期音声を開始できませんでした。もう一度再生してください。', 'error');
   });
-  startAudioSyncMonitor();
 });
-vocalAudio.addEventListener('pause', () => { originalAudio.pause(); stopAudioSync(); });
-vocalAudio.addEventListener('ended', () => { originalAudio.pause(); stopAudioSync(); });
-vocalAudio.addEventListener('seeking', () => { originalAudio.pause(); stopAudioSync(); });
+vocalAudio.addEventListener('pause', () => {
+  originalAudio.pause();
+  stopAudioSync();
+  // 動画へ切り替えた直後のpauseイベントで、動画側の予約を消さない。
+  if (videoEl.paused) stopVocal();
+});
+vocalAudio.addEventListener('ended', stopVocal);
+vocalAudio.addEventListener('seeking', stopVocal);
 vocalAudio.addEventListener('seeked', () => {
-  syncOriginalAudio(true);
   if (!vocalAudio.paused) {
-    originalAudio.play().catch(() => {});
-    startAudioSyncMonitor();
+    startAudioMixWhenReady().catch(console.error);
   }
 });
 vocalAudio.addEventListener('ratechange', () => {
-  originalAudio.playbackRate = vocalAudio.playbackRate;
+  if (!vocalAudio.paused) startAudioMixWhenReady().catch(console.error);
 });
 videoEl.addEventListener('seeked', () => {
   if (!videoEl.paused && videoEl.readyState >= HTMLMediaElement.HAVE_FUTURE_DATA && vocalBuffer) {
@@ -779,10 +906,7 @@ mixSlider.addEventListener('input', () => {
   mixVal.value = value.toFixed(2);
   postMixSlider.value = String(value);
   updatePostMixDisplay();
-  vocalAudio.volume = value;
-  originalAudio.volume = 1 - value;
-  if (audioCtx && vocalGain) vocalGain.gain.setValueAtTime(value, audioCtx.currentTime);
-  if (audioCtx && videoGain) videoGain.gain.setValueAtTime(1 - value, audioCtx.currentTime);
+  if (audioCtx) applyMixLevels();
 });
 
 reextractBtn.addEventListener('click', async () => {
