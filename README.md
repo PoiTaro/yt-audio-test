@@ -90,7 +90,9 @@ YouTube.jsは非公式のInnerTubeクライアントで、YouTubeの仕様変更
 
 ## Render検証サービス
 
-`Dockerfile`でNode.jsとFFmpegを同じコンテナに入れ、起動後に固定3動画を`ANDROID_VR`、`IOS`、`WEB`、`MWEB`、`ANDROID`、`TV`で自動検証します。任意URLを受け付ける公開APIはありません。`TEST_CLIENTS`環境変数をカンマ区切りで設定すると対象を変更できます。
+`Dockerfile`でNode.jsとFFmpegを同じコンテナに入れ、起動後に固定3動画を複数のInnerTubeクライアントで自動検証します。任意URLを受け付ける公開APIはありません。`TEST_CLIENTS`環境変数をカンマ区切りで設定すると対象を変更できます。
+
+既定の`SESSION_MODE=dedicated`では、クライアントごとに専用Session、User-Agent、Visitor Dataを作ります。比較用の`SESSION_MODE=override`では、共通WEB Sessionにリクエスト単位のclient指定を適用します。`GENERATE_SESSION_LOCALLY=true`を指定すると、YouTubeからSession dataを取得せずローカル生成する条件も比較できます。
 
 - `/health`: 実行状況
 - `/report`: 期限付きストリームURLを除いた検証結果

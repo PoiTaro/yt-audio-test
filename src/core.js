@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { Constants, Innertube, UniversalCache } from 'youtubei.js';
+import { ClientType, Constants, Innertube, UniversalCache } from 'youtubei.js';
 
 export const SUPPORTED_CLIENTS = [
   'ANDROID_VR',
@@ -12,6 +12,24 @@ export const SUPPORTED_CLIENTS = [
   'ANDROID',
   'TV',
 ];
+
+export const SESSION_CLIENT_TYPES = {
+  WEB: ClientType.WEB,
+  MWEB: ClientType.MWEB,
+  YTKIDS: ClientType.KIDS,
+  YTMUSIC: ClientType.MUSIC,
+  IOS: ClientType.IOS,
+  ANDROID: ClientType.ANDROID,
+  ANDROID_VR: ClientType.ANDROID_VR,
+  VISIONOS: ClientType.VISIONOS,
+  YTMUSIC_ANDROID: ClientType.ANDROID_MUSIC,
+  YTSTUDIO_ANDROID: ClientType.ANDROID_CREATOR,
+  TV: ClientType.TV,
+  TV_SIMPLY: ClientType.TV_SIMPLY,
+  TV_EMBEDDED: ClientType.TV_EMBEDDED,
+  WEB_EMBEDDED: ClientType.WEB_EMBEDDED,
+  WEB_CREATOR: ClientType.WEB_CREATOR,
+};
 
 export function extractVideoId(input) {
   const value = String(input ?? '').trim();
@@ -122,13 +140,25 @@ export function inspectExpiry(streamUrl) {
   }
 }
 
-export async function createResolver(cacheDirectory) {
+export async function createResolver(cacheDirectory, options = {}) {
   await mkdir(cacheDirectory, { recursive: true });
-  return Innertube.create({
+  const config = {
     cache: new UniversalCache(true, cacheDirectory),
     lang: 'ja',
     location: 'JP',
-  });
+  };
+  if (options.client) {
+    const clientType = SESSION_CLIENT_TYPES[options.client];
+    if (!clientType) throw new ProbeError('UNSUPPORTED_CLIENT', `専用Session未対応: ${options.client}`);
+    config.client_type = clientType;
+  }
+  if (typeof options.generateSessionLocally === 'boolean') {
+    config.generate_session_locally = options.generateSessionLocally;
+  }
+  if (typeof options.enableSessionCache === 'boolean') {
+    config.enable_session_cache = options.enableSessionCache;
+  }
+  return Innertube.create(config);
 }
 
 export async function probeHttp(streamUrl, timeoutMs = 15_000) {
@@ -324,6 +354,7 @@ export async function probeClient({
   ffmpegTimeoutMs = 45_000,
   skipHttp = false,
   skipFfmpeg = false,
+  requestClientOverride = true,
   log = () => {},
 }) {
   const result = {
@@ -346,7 +377,7 @@ export async function probeClient({
 
   try {
     log(`InnerTube ${client}: 接続中`);
-    const info = await youtube.getBasicInfo(videoId, { client });
+    const info = await youtube.getBasicInfo(videoId, requestClientOverride ? { client } : undefined);
     result.metadataSuccess = true;
     result.playability = {
       status: info.playability_status?.status ?? null,

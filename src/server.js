@@ -2,10 +2,10 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { buildSummary, createResolver, extractVideoId, probeClient } from './core.js';
+import { buildSummary, classifyError, createResolver, extractVideoId, probeClient } from './core.js';
 
 const port = Number(process.env.PORT || 10000);
-const clients = (process.env.TEST_CLIENTS || 'ANDROID_VR,IOS,WEB,MWEB,ANDROID,TV')
+const clients = (process.env.TEST_CLIENTS || 'ANDROID_VR,IOS,WEB,MWEB,ANDROID,TV,TV_SIMPLY,TV_EMBEDDED,WEB_EMBEDDED,VISIONOS,YTMUSIC,YTMUSIC_ANDROID,YTKIDS,WEB_CREATOR,YTSTUDIO_ANDROID')
   .split(',')
   .map((value) => value.trim().toUpperCase())
   .filter(Boolean);
@@ -14,6 +14,8 @@ const inputs = (process.env.TEST_VIDEO_IDS || 'M7lc1UVf-VE,aqz-KE-bpKQ,jNQXAC9IV
   .map((value) => value.trim())
   .filter(Boolean);
 const outputDirectory = path.join(os.tmpdir(), 'youtube-audio-stream-probe');
+const sessionMode = process.env.SESSION_MODE || 'dedicated';
+const generateSessionLocally = process.env.GENERATE_SESSION_LOCALLY === 'true';
 
 const state = {
   status: 'starting',
@@ -35,6 +37,8 @@ const state = {
     cookie: false,
     login: false,
     poToken: false,
+    sessionMode,
+    generateSessionLocally,
   },
   progress: { completedAttempts: 0, totalAttempts: inputs.length * clients.length },
   results: [],
@@ -99,19 +103,62 @@ async function runValidation() {
   state.status = 'running';
   console.log(`Starting ${state.progress.totalAttempts} Render validation attempts`);
   try {
-    const youtube = await createResolver(path.join(outputDirectory, '.cache'));
+    let sharedYoutube = null;
+    const dedicatedSessions = new Map();
+    if (sessionMode === 'override') {
+      sharedYoutube = await createResolver(path.join(outputDirectory, '.cache', 'shared'), {
+        generateSessionLocally,
+        enableSessionCache: false,
+      });
+    }
     for (const input of inputs) {
       const videoId = extractVideoId(input);
       const entry = { input, videoId, attempts: [] };
       for (const client of clients) {
-        const attempt = await probeClient({
-          youtube,
-          videoId,
-          client,
-          outputDirectory,
-          seconds: 10,
-          log: (message) => console.log(`[${videoId}][${client}] ${message}`),
-        });
+        let attempt;
+        try {
+          let youtube = sharedYoutube;
+          if (sessionMode === 'dedicated') {
+            if (!dedicatedSessions.has(client)) {
+              dedicatedSessions.set(client, await createResolver(path.join(outputDirectory, '.cache', client), {
+                client,
+                generateSessionLocally,
+                enableSessionCache: false,
+              }));
+            }
+            youtube = dedicatedSessions.get(client);
+          }
+          attempt = await probeClient({
+            youtube,
+            videoId,
+            client,
+            outputDirectory,
+            seconds: 10,
+            requestClientOverride: sessionMode !== 'dedicated',
+            log: (message) => console.log(`[${videoId}][${client}] ${message}`),
+          });
+        } catch (error) {
+          const classified = classifyError(error);
+          console.error(`[${videoId}][${client}] Session failure: ${classified.code} - ${classified.message}`);
+          attempt = {
+            client,
+            startedAt: new Date().toISOString(),
+            completedAt: new Date().toISOString(),
+            success: false,
+            metadataSuccess: false,
+            streamUrlSuccess: false,
+            googlevideoSuccess: null,
+            ffmpegSuccess: null,
+            playability: null,
+            video: null,
+            formats: [],
+            selectedFormat: null,
+            streamExpiry: null,
+            http: null,
+            ffmpeg: null,
+            error: classified,
+          };
+        }
         entry.attempts.push(sanitizeAttempt(attempt));
         state.progress.completedAttempts += 1;
       }
