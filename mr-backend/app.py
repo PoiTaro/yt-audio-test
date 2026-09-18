@@ -1719,6 +1719,78 @@ def _fetch_worker_range_with_retry(*args) -> tuple[bytes, int, int, int, str, st
     raise RuntimeError(str(last_error or "地域Resolverの分割取得に失敗しました。")) from last_error
 
 
+def _stream_worker_range(
+    endpoint: str,
+    source_url: str,
+    token: str,
+    start: int,
+    end: int,
+    region: str | None,
+    format_hint: str | None,
+    output_path: Path,
+) -> tuple[int, str, str]:
+    """Worker応答をメモリへ溜めず、そのまま一時ファイルへ流す。"""
+    params = {"url": source_url}
+    if region:
+        params["region"] = region
+    if media_format := (format_hint or "").strip().lower():
+        params["format"] = media_format
+    request_object = urlrequest.Request(
+        f"{endpoint}?{urlparse.urlencode(params)}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "audio/*,video/*",
+            "Range": f"bytes={start}-{end}",
+            "User-Agent": "mr-removal-web/2.0",
+        },
+    )
+    try:
+        with urlrequest.urlopen(request_object, timeout=180) as response:
+            if getattr(response, "status", None) != 206:
+                raise RuntimeError(
+                    f"地域ResolverがHTTP {getattr(response, 'status', '?')}を返しました。"
+                )
+            actual_start, actual_end, total = _parse_worker_range(
+                response.headers.get("Content-Range")
+            )
+            if actual_start != start or actual_end != min(end, total - 1):
+                raise RuntimeError("地域Resolverのストリーム範囲が要求と一致しません。")
+            written = 0
+            with output_path.open("wb") as output:
+                while block := response.read(1_024 * 1_024):
+                    output.write(block)
+                    written += len(block)
+            expected = actual_end - actual_start + 1
+            if written != expected:
+                raise RuntimeError(
+                    f"地域Resolverのストリームが不完全です: expected={expected}, actual={written}"
+                )
+            return (
+                total,
+                response.headers.get("X-Resolver-Region", "").strip(),
+                response.headers.get_content_type(),
+            )
+    except urlerror.HTTPError as error:
+        detail = error.read(8_192).decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"地域ResolverがHTTP {error.code}を返しました: {detail[:1200]}"
+        ) from error
+    except urlerror.URLError as error:
+        raise RuntimeError(f"地域Resolverへ接続できませんでした: {error.reason}") from error
+
+
+def _stream_worker_range_with_retry(*args) -> tuple[int, str, str]:
+    last_error: Exception | None = None
+    output_path = args[-1]
+    for _ in range(3):
+        try:
+            return _stream_worker_range(*args)
+        except Exception as error:
+            last_error = error
+            output_path.unlink(missing_ok=True)
+    raise RuntimeError(str(last_error or "地域Resolverのストリーム取得に失敗しました。")) from last_error
+
+
 def _download_media_from_worker(
     url: str,
     label: str,
@@ -1735,19 +1807,18 @@ def _download_media_from_worker(
     if media_type == "audio" and not FFMPEG_PATH:
         raise RuntimeError("FFmpegが見つかりません。")
 
-    chunk_bytes = 1_024 * 1_024
-    probe_start = chunk_bytes
+    # 先頭だけ通る地域を選ばないよう、1MiB地点の1 byteで解決先を試す。
+    probe_start = 1_024 * 1_024
     region: str | None = None
     total_bytes: int | None = None
     content_type = "application/octet-stream"
-    # 先頭だけ通る地域を選ばないよう、まず1 MiB以降を試す。
     try:
         probe = _fetch_worker_range_with_retry(
             endpoint,
             url,
             token,
             probe_start,
-            probe_start + chunk_bytes - 1,
+            probe_start,
             None,
             format_hint,
         )
@@ -1755,87 +1826,55 @@ def _download_media_from_worker(
         region = probe[4] or None
         content_type = probe[5]
     except RuntimeError:
-        # 1 MiB未満の短い動画・音声では範囲外になるため、先頭から取得する。
-        pass
+        # 1 MiB未満の短い素材では先頭1 byteから総サイズだけ取得する。
+        probe = _fetch_worker_range_with_retry(
+            endpoint,
+            url,
+            token,
+            0,
+            0,
+            None,
+            format_hint,
+        )
+        total_bytes = probe[3]
+        region = probe[4] or None
+        content_type = probe[5]
 
     source_path = MEDIA_DIR / f".{label}_{uuid.uuid4().hex[:12]}.source"
     output_suffix = ".wav" if media_type == "audio" else ".mp4"
     output_path = MEDIA_DIR / f"{label}_{uuid.uuid4().hex[:12]}{output_suffix}"
     completed = False
     try:
-        position = 0
-        with source_path.open("wb") as output:
-            if total_bytes is not None:
-                if total_bytes > app.config["MAX_CONTENT_LENGTH"]:
-                    raise RuntimeError(f"取得メディアが上限（{MAX_CONTENT_MB} MB）を超えています。")
-                ranges = [
-                    (start, min(start + chunk_bytes - 1, total_bytes - 1))
-                    for start in range(0, total_bytes, chunk_bytes)
-                ]
-
-                def fetch_part(byte_range: tuple[int, int]):
-                    start, end = byte_range
-                    try:
-                        return _fetch_worker_range_with_retry(
-                            endpoint,
-                            url,
-                            token,
-                            start,
-                            end,
-                            region,
-                            format_hint,
-                        )
-                    except RuntimeError:
-                        # 選択地域が一時的に拒否した範囲だけ、自動選択で取り直す。
-                        return _fetch_worker_range_with_retry(
-                            endpoint,
-                            url,
-                            token,
-                            start,
-                            end,
-                            None,
-                            format_hint,
-                        )
-
-                # 4範囲ずつ並列取得し、書込み順とメモリ上限は維持する。
-                with ThreadPoolExecutor(max_workers=4) as executor:
-                    for batch_start in range(0, len(ranges), 4):
-                        batch = ranges[batch_start : batch_start + 4]
-                        parts = list(executor.map(fetch_part, batch))
-                        for expected_range, part in zip(batch, parts):
-                            payload, actual_start, actual_end, part_total, part_region, part_type = part
-                            if part_total != total_bytes or actual_start != expected_range[0]:
-                                raise RuntimeError(
-                                    "地域Resolverの総サイズまたは分割位置が途中で変わりました。"
-                                )
-                            if actual_end != expected_range[1]:
-                                raise RuntimeError("地域Resolverの分割終端が要求と一致しません。")
-                            content_type = part_type
-                            output.write(payload)
-                            position = actual_end + 1
-            else:
-                # サイズを事前取得できない短い素材だけ、従来どおり直列で読む。
-                while total_bytes is None or position < total_bytes:
-                    requested_end = (
-                        position + chunk_bytes - 1
-                        if total_bytes is None
-                        else min(position + chunk_bytes - 1, total_bytes - 1)
-                    )
-                    part = _fetch_worker_range_with_retry(
-                        endpoint, url, token, position, requested_end, region, format_hint
-                    )
-                    payload, actual_start, actual_end, part_total, part_region, part_type = part
-                    if total_bytes is None:
-                        total_bytes = part_total
-                    if part_total != total_bytes or actual_start != position:
-                        raise RuntimeError("地域Resolverの総サイズまたは分割位置が途中で変わりました。")
-                    if total_bytes > app.config["MAX_CONTENT_LENGTH"]:
-                        raise RuntimeError(f"取得メディアが上限（{MAX_CONTENT_MB} MB）を超えています。")
-                    if part_region:
-                        region = part_region
-                    content_type = part_type
-                    output.write(payload)
-                    position = actual_end + 1
+        if total_bytes > app.config["MAX_CONTENT_LENGTH"]:
+            raise RuntimeError(f"取得メディアが上限（{MAX_CONTENT_MB} MB）を超えています。")
+        try:
+            streamed_total, streamed_region, streamed_type = _stream_worker_range_with_retry(
+                endpoint,
+                url,
+                token,
+                0,
+                total_bytes - 1,
+                region,
+                format_hint,
+                source_path,
+            )
+        except RuntimeError:
+            # 選択地域が全体転送で拒否した場合、全地域を同じRangeで試す。
+            streamed_total, streamed_region, streamed_type = _stream_worker_range_with_retry(
+                endpoint,
+                url,
+                token,
+                0,
+                total_bytes - 1,
+                None,
+                format_hint,
+                source_path,
+            )
+        if streamed_total != total_bytes:
+            raise RuntimeError("地域Resolverの総サイズが途中で変わりました。")
+        if streamed_region:
+            region = streamed_region
+        content_type = streamed_type
 
         if total_bytes is None or source_path.stat().st_size != total_bytes:
             raise RuntimeError("地域Resolverから取得したメディアが不完全です。")
