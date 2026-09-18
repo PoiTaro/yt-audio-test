@@ -746,9 +746,11 @@ def _refine_time_map_low_memory(
     """各アンカー周辺だけ高解像度STFTを作り、約5.8ms単位で補正する。"""
     fine_hop = 64
     frame_seconds = fine_hop / sample_rate
-    window_seconds = 0.48
+    # 0.88秒の音響文脈があれば歌声・伴奏の局所照合には十分で、
+    # 1秒ごとのアンカーを5.8ms精度で補正できる。
+    window_seconds = 0.44
     search_seconds = 0.32
-    anchors = np.arange(0.8, len(original) / sample_rate - 0.8, 0.75)
+    anchors = np.arange(0.8, len(original) / sample_rate - 0.8, 1.0)
     accepted_times: list[float] = []
     accepted_corrections: list[float] = []
     accepted_refined_times: list[float] = []
@@ -1010,7 +1012,6 @@ def _extract_vocals_chunked(
     if time_map is not None:
         original_map_times, karaoke_map_times, map_confidence = time_map
     filled_until = 0
-
     for start in starts:
         end = min(output_length, start + chunk_samples)
         original_chunk = original[start:end]
