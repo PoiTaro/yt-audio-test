@@ -480,6 +480,33 @@ body.policy-dialog-open { overflow: hidden; }
 @keyframes progressPulse { 50% { opacity: .45; transform: scale(.82); } }
 @keyframes progressTravel { from { transform: translateX(-110%); } to { transform: translateX(300%); } }
 
+@media (min-width: 641px) {
+  .shell { width: min(100% - 40px, 760px); min-height: calc(100vh - 32px); margin: 16px auto; padding: 2rem 2.5rem 3rem; border-radius: 38px; }
+  .app-header { grid-template-columns: minmax(0, 1.08fr) minmax(230px, .92fr); gap: 1rem; min-height: 330px; margin: 0 -.25rem -2.5rem; padding: .5rem .25rem 1.2rem; }
+  .app-header::before { bottom: 2.8rem; height: 5.5rem; }
+  .hero-copy { padding-top: .5rem; }
+  .hero-copy .product-name { margin-bottom: 1.35rem; font-size: .86rem; }
+  .hero-copy h1 { max-width: 390px; font-size: clamp(2.35rem, 5vw, 3rem); line-height: 1.24; }
+  .hero-copy > p:last-child { max-width: 18rem; margin-top: 1.15rem; font-size: 1rem; line-height: 1.65; }
+  .hero-visual { max-width: 320px; }
+  .hero-decoration--note { font-size: 1.7rem; }
+  .hero-decoration--spark { font-size: 1rem; }
+  .help-menu { top: 0; }
+  .help-menu summary { width: 3rem; height: 3rem; font-size: 1.25rem; }
+  .help-menu__body { top: 3.55rem; }
+  .workspace, .status, .progress-panel, .file-source, .result, .site-footer { max-width: 650px; }
+  .workspace { padding: 2.15rem 2.4rem; border-radius: 34px; }
+  .section-heading { margin-bottom: 1.4rem; }
+  h2 { font-size: 1.6rem; }
+  .url-primary-field input, .instrumental-option input { min-height: 3.65rem; }
+  .instrumental-option { margin-top: 1.25rem; padding-top: 1.25rem; }
+  .form-footer { margin-top: 1.4rem; }
+  .button--primary { min-height: 3.8rem; font-size: 1rem; }
+  .file-source { margin-top: 1.7rem; }
+  .result { margin-top: 3.2rem; }
+  .site-footer { margin-top: 3.5rem; }
+}
+
 @media (max-width: 640px) {
   .shell { width: calc(100% - 12px); min-height: calc(100vh - 12px); margin: 6px auto; padding: 2rem 1rem 4rem; border: 1px solid #e2e6f7; border-radius: 32px; box-shadow: 0 12px 30px rgb(66 78 132 / 6%); }
   .app-header { grid-template-columns: minmax(0, 1.08fr) minmax(190px, .92fr); gap: .7rem; min-height: auto; margin: 0 -.15rem; padding: .35rem .15rem 1rem; }
