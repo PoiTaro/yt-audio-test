@@ -19,6 +19,7 @@ RUN npm ci --omit=dev
 
 COPY src ./src
 COPY docker ./docker
+RUN cp ./docker/session-extractor.py /opt/yt-session-generator/potoken_generator/extractor.py
 RUN chmod +x ./docker/start.sh
 
 ENV NODE_ENV=production
