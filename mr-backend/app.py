@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 import uuid
+import math
 from collections import defaultdict, deque
 from pathlib import Path
 from urllib import error as urlerror
@@ -100,13 +101,15 @@ def _load_analysis_dependencies() -> None:
     with ANALYSIS_IMPORT_LOCK:
         if np is not None:
             return
-        import librosa as librosa_module
         import numpy as numpy_module
         import scipy.ndimage as ndimage_module
         import scipy.signal as signal_module
         import soundfile as soundfile_module
 
-        librosa = librosa_module
+        if not LOW_MEMORY_MODE:
+            import librosa as librosa_module
+
+            librosa = librosa_module
         np = numpy_module
         ndi = ndimage_module
         sps = signal_module
@@ -543,6 +546,326 @@ def _piecewise_time_map(
     return original_times, karaoke_times, np.clip(confidence, 0.0, 1.0)
 
 
+def _read_audio_low_memory(path: Path) -> np.ndarray:
+    """librosa/Numbaを起動せず、解析用のmono float32音声を読む。"""
+    samples, sample_rate = sf.read(path, dtype="float32", always_2d=False)
+    if samples.ndim > 1:
+        samples = np.mean(samples, axis=1, dtype=np.float32)
+    if sample_rate != SAMPLE_RATE:
+        divisor = math.gcd(sample_rate, SAMPLE_RATE)
+        samples = sps.resample_poly(
+            samples,
+            SAMPLE_RATE // divisor,
+            sample_rate // divisor,
+        ).astype(np.float32, copy=False)
+    if not len(samples):
+        raise ValueError("空の音声ファイルは処理できません。")
+    return _normalise(samples).astype(np.float32, copy=False)
+
+
+def _spectral_features_low_memory(
+    samples: np.ndarray,
+    sample_rate: int,
+    hop_length: int,
+) -> np.ndarray:
+    """局所補正用の対数周波数＋発音特徴量を小さい区間だけ計算する。"""
+    n_fft = 1_024
+    if len(samples) < n_fft:
+        return np.empty((80, 0), dtype=np.float32)
+    frequencies, _, spectrum = sps.stft(
+        samples,
+        fs=sample_rate,
+        window="hann",
+        nperseg=n_fft,
+        noverlap=n_fft - hop_length,
+        nfft=n_fft,
+        boundary=None,
+        padded=False,
+    )
+    magnitude = np.abs(spectrum).astype(np.float32, copy=False)
+    usable = np.flatnonzero(
+        (frequencies >= 55) & (frequencies <= min(7_500, sample_rate / 2))
+    )
+    bands = np.zeros((40, magnitude.shape[1]), dtype=np.float32)
+    if usable.size:
+        edges = np.geomspace(55, min(7_500, sample_rate / 2), 41)
+        for band in range(40):
+            selected = usable[
+                (frequencies[usable] >= edges[band])
+                & (frequencies[usable] < edges[band + 1])
+            ]
+            if selected.size:
+                bands[band] = np.mean(magnitude[selected], axis=0)
+    log_bands = np.log1p(bands * np.float32(12.0)).astype(np.float32, copy=False)
+    spectral_flux = np.maximum(
+        np.diff(log_bands, axis=1, prepend=log_bands[:, :1]),
+        0,
+    ).astype(np.float32, copy=False)
+    features = np.vstack((log_bands, spectral_flux * np.float32(1.35))).astype(
+        np.float32, copy=False
+    )
+    norms = np.linalg.norm(features, axis=0, keepdims=True)
+    return features / np.maximum(norms, np.float32(1e-7))
+
+
+def _chroma_low_memory(
+    samples: np.ndarray,
+    sample_rate: int,
+    n_fft: int,
+    hop_length: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """DTW用クロマをSciPyだけで生成する。"""
+    frequencies, frame_times, spectrum = sps.stft(
+        samples,
+        fs=sample_rate,
+        window="hann",
+        nperseg=n_fft,
+        noverlap=n_fft - hop_length,
+        nfft=n_fft,
+        boundary=None,
+        padded=False,
+    )
+    magnitude = np.abs(spectrum).astype(np.float32, copy=False)
+    valid = frequencies >= 27.5
+    midi = np.rint(69 + 12 * np.log2(frequencies[valid] / 440.0)).astype(np.int16)
+    pitch_classes = np.mod(midi, 12)
+    chroma = np.zeros((12, magnitude.shape[1]), dtype=np.float32)
+    valid_magnitude = magnitude[valid]
+    for pitch_class in range(12):
+        selected = pitch_classes == pitch_class
+        if np.any(selected):
+            chroma[pitch_class] = np.sum(valid_magnitude[selected], axis=0)
+    chroma = np.log1p(chroma).astype(np.float32, copy=False)
+    norms = np.linalg.norm(chroma, axis=0, keepdims=True)
+    chroma /= np.maximum(norms, np.float32(1e-7))
+    return chroma, frame_times.astype(np.float64, copy=False)
+
+
+def _dtw_path_low_memory(
+    original_features: np.ndarray,
+    karaoke_features: np.ndarray,
+) -> tuple[list[tuple[int, int]], np.ndarray]:
+    """小さなクロマ行列上で標準DTWを行い、経路と類似度を返す。"""
+    similarity = np.clip(
+        original_features.T @ karaoke_features,
+        -1.0,
+        1.0,
+    ).astype(np.float32, copy=False)
+    rows, columns = similarity.shape
+    accumulated = np.full((rows, columns), np.inf, dtype=np.float32)
+    direction = np.zeros((rows, columns), dtype=np.uint8)
+    accumulated[0, 0] = np.float32(1.0) - similarity[0, 0]
+    for row in range(1, rows):
+        accumulated[row, 0] = accumulated[row - 1, 0] + np.float32(1.0) - similarity[row, 0]
+        direction[row, 0] = 1
+    for column in range(1, columns):
+        accumulated[0, column] = accumulated[0, column - 1] + np.float32(1.0) - similarity[0, column]
+        direction[0, column] = 2
+    for row in range(1, rows):
+        for column in range(1, columns):
+            diagonal = accumulated[row - 1, column - 1]
+            upward = accumulated[row - 1, column]
+            leftward = accumulated[row, column - 1]
+            if diagonal <= upward and diagonal <= leftward:
+                previous = diagonal
+                direction[row, column] = 0
+            elif upward <= leftward:
+                previous = upward
+                direction[row, column] = 1
+            else:
+                previous = leftward
+                direction[row, column] = 2
+            accumulated[row, column] = previous + np.float32(1.0) - similarity[row, column]
+
+    row, column = rows - 1, columns - 1
+    path = [(row, column)]
+    while row or column:
+        step = int(direction[row, column])
+        if row and column and step == 0:
+            row -= 1
+            column -= 1
+        elif row and (not column or step == 1):
+            row -= 1
+        else:
+            column -= 1
+        path.append((row, column))
+    path.reverse()
+    return path, similarity
+
+
+def _refine_time_map_low_memory(
+    original: np.ndarray,
+    karaoke: np.ndarray,
+    sample_rate: int,
+    original_times: np.ndarray,
+    karaoke_times: np.ndarray,
+    confidence: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """各アンカー周辺だけ高解像度STFTを作り、約5.8ms単位で補正する。"""
+    fine_hop = 64
+    frame_seconds = fine_hop / sample_rate
+    window_seconds = 0.48
+    search_seconds = 0.32
+    anchors = np.arange(0.8, len(original) / sample_rate - 0.8, 0.75)
+    accepted_times: list[float] = []
+    accepted_corrections: list[float] = []
+    accepted_refined_times: list[float] = []
+    accepted_scores: list[float] = []
+
+    for anchor_time in anchors:
+        coarse_confidence = float(np.interp(anchor_time, original_times, confidence))
+        if coarse_confidence < 0.12:
+            continue
+        predicted_time = float(np.interp(anchor_time, original_times, karaoke_times))
+        original_start_time = anchor_time - window_seconds
+        original_end_time = anchor_time + window_seconds
+        region_start_time = predicted_time - search_seconds - window_seconds
+        region_end_time = predicted_time + search_seconds + window_seconds
+        if original_start_time < 0 or region_start_time < 0:
+            continue
+        if original_end_time > len(original) / sample_rate:
+            continue
+        if region_end_time > len(karaoke) / sample_rate:
+            continue
+        original_segment = original[
+            round(original_start_time * sample_rate) : round(original_end_time * sample_rate)
+        ]
+        karaoke_region = karaoke[
+            round(region_start_time * sample_rate) : round(region_end_time * sample_rate)
+        ]
+        original_features = _spectral_features_low_memory(
+            original_segment, sample_rate, fine_hop
+        )
+        karaoke_features = _spectral_features_low_memory(
+            karaoke_region, sample_rate, fine_hop
+        )
+        window_length = original_features.shape[1]
+        if window_length < 3 or karaoke_features.shape[1] < window_length:
+            continue
+        candidate_windows = np.lib.stride_tricks.sliding_window_view(
+            karaoke_features,
+            window_length,
+            axis=1,
+        )
+        scores = np.einsum(
+            "ft,fct->c",
+            original_features,
+            candidate_windows,
+            optimize=True,
+        ) / window_length
+        best_index = int(np.argmax(scores))
+        best_score = float(scores[best_index])
+        margin = best_score - float(np.percentile(scores, 75))
+        if best_score < 0.42 or (margin < 0.006 and best_score < 0.68):
+            continue
+        subframe = 0.0
+        if 0 < best_index < len(scores) - 1:
+            left = float(scores[best_index - 1])
+            center = float(scores[best_index])
+            right = float(scores[best_index + 1])
+            denominator = left - 2 * center + right
+            if abs(denominator) > 1e-9:
+                subframe = float(
+                    np.clip(0.5 * (left - right) / denominator, -0.5, 0.5)
+                )
+        refined_time = (
+            predicted_time
+            - search_seconds
+            + (best_index + subframe) * frame_seconds
+        )
+        correction = float(np.clip(refined_time - predicted_time, -0.32, 0.32))
+        accepted_times.append(float(anchor_time))
+        accepted_corrections.append(correction)
+        accepted_refined_times.append(refined_time)
+        accepted_scores.append(best_score)
+
+    if len(accepted_times) < 3:
+        return karaoke_times, confidence
+    anchor_times = np.asarray(accepted_times, dtype=np.float64)
+    anchor_refined = np.maximum.accumulate(
+        np.asarray(accepted_refined_times, dtype=np.float64)
+    )
+    corrections = np.asarray(accepted_corrections, dtype=np.float64)
+    refined_times = karaoke_times.copy()
+    inside = (original_times >= anchor_times[0]) & (original_times <= anchor_times[-1])
+    refined_times[inside] = np.interp(
+        original_times[inside], anchor_times, anchor_refined
+    )
+    refined_times[original_times < anchor_times[0]] += corrections[0]
+    refined_times[original_times > anchor_times[-1]] += corrections[-1]
+    refined_times = np.maximum.accumulate(
+        np.clip(refined_times, 0, len(karaoke) / sample_rate)
+    )
+    fine_confidence = np.interp(
+        original_times,
+        anchor_times,
+        np.asarray(accepted_scores, dtype=np.float64),
+    )
+    return refined_times, np.maximum(confidence, np.clip(fine_confidence, 0, 1))
+
+
+def _piecewise_time_map_low_memory(
+    original: np.ndarray,
+    karaoke: np.ndarray,
+    sample_rate: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Render向けにメモリを抑えたクロマDTW＋局所補正を行う。"""
+    analysis_sr = 11_025
+    analysis_hop = 2_048
+    divisor = math.gcd(sample_rate, analysis_sr)
+    original_small = sps.resample_poly(
+        original, analysis_sr // divisor, sample_rate // divisor
+    ).astype(np.float32, copy=False)
+    karaoke_small = sps.resample_poly(
+        karaoke, analysis_sr // divisor, sample_rate // divisor
+    ).astype(np.float32, copy=False)
+    if min(len(original_small), len(karaoke_small)) < analysis_sr * 4:
+        raise ValueError("動的な位置合わせには音声が短すぎます。")
+
+    original_chroma, original_times = _chroma_low_memory(
+        original_small, analysis_sr, 4_096, analysis_hop
+    )
+    karaoke_chroma, karaoke_frame_times = _chroma_low_memory(
+        karaoke_small, analysis_sr, 4_096, analysis_hop
+    )
+    path, similarity = _dtw_path_low_memory(original_chroma, karaoke_chroma)
+    frame_count = original_chroma.shape[1]
+    mapped_frames = np.full(frame_count, np.nan, dtype=np.float64)
+    confidence = np.zeros(frame_count, dtype=np.float32)
+    candidates: list[list[tuple[int, float]]] = [[] for _ in range(frame_count)]
+    for original_frame, karaoke_frame in path:
+        candidates[original_frame].append(
+            (karaoke_frame, float(similarity[original_frame, karaoke_frame]))
+        )
+    for frame, matches in enumerate(candidates):
+        if matches:
+            best_frame, best_similarity = max(matches, key=lambda match: match[1])
+            mapped_frames[frame] = best_frame
+            confidence[frame] = best_similarity
+    known = np.flatnonzero(np.isfinite(mapped_frames))
+    if known.size < 2:
+        raise ValueError("区間別の位置合わせを推定できませんでした。")
+    mapped_frames = np.interp(np.arange(frame_count), known, mapped_frames[known])
+    if frame_count >= 9:
+        mapped_frames = sps.medfilt(mapped_frames, kernel_size=9)
+        confidence = sps.medfilt(confidence, kernel_size=5)
+    mapped_frames = np.maximum.accumulate(mapped_frames)
+    karaoke_times = np.interp(
+        mapped_frames,
+        np.arange(len(karaoke_frame_times)),
+        karaoke_frame_times,
+    )
+    karaoke_times, confidence = _refine_time_map_low_memory(
+        original_small,
+        karaoke_small,
+        analysis_sr,
+        original_times,
+        karaoke_times,
+        confidence,
+    )
+    return original_times, karaoke_times, np.clip(confidence, 0.0, 1.0)
+
+
 def align_audio(
     original_file: Path, karaoke_file: Path
 ) -> tuple[
@@ -554,69 +877,15 @@ def align_audio(
 ]:
     """区間別DTWを優先し、失敗時は従来の一定オフセットで音源を揃える。"""
     if LOW_MEMORY_MODE:
-        # Render Free (512 MB) ではlibrosa/Numbaの初回JITコンパイルが
-        # メモリ上限に達するため、WAV読込と全体位置合わせをSciPyだけで行う。
-        original, original_sr = sf.read(original_file, dtype="float32", always_2d=False)
-        karaoke, karaoke_sr = sf.read(karaoke_file, dtype="float32", always_2d=False)
-        if original.ndim > 1:
-            original = np.mean(original, axis=1, dtype=np.float32)
-        if karaoke.ndim > 1:
-            karaoke = np.mean(karaoke, axis=1, dtype=np.float32)
-        if original_sr != SAMPLE_RATE:
-            divisor = __import__("math").gcd(original_sr, SAMPLE_RATE)
-            original = sps.resample_poly(
-                original,
-                SAMPLE_RATE // divisor,
-                original_sr // divisor,
-            ).astype(np.float32, copy=False)
-        if karaoke_sr != SAMPLE_RATE:
-            divisor = __import__("math").gcd(karaoke_sr, SAMPLE_RATE)
-            karaoke = sps.resample_poly(
-                karaoke,
-                SAMPLE_RATE // divisor,
-                karaoke_sr // divisor,
-            ).astype(np.float32, copy=False)
-        if not len(original) or not len(karaoke):
-            raise ValueError("空の音声ファイルは処理できません。")
-
-        original = _normalise(original).astype(np.float32, copy=False)
-        karaoke = _normalise(karaoke).astype(np.float32, copy=False)
-        analysis_sr = 2_000
-        divisor = __import__("math").gcd(SAMPLE_RATE, analysis_sr)
-        original_small = sps.resample_poly(
+        # 同じ区間別DTW＋約5.8ms局所補正を、SciPyの小分け計算で行う。
+        original = _read_audio_low_memory(original_file)
+        karaoke = _read_audio_low_memory(karaoke_file)
+        time_map = _piecewise_time_map_low_memory(
             original,
-            analysis_sr // divisor,
-            SAMPLE_RATE // divisor,
-        )
-        karaoke_small = sps.resample_poly(
             karaoke,
-            analysis_sr // divisor,
-            SAMPLE_RATE // divisor,
+            SAMPLE_RATE,
         )
-        max_lag = min(
-            30 * analysis_sr,
-            max(len(original_small), len(karaoke_small)) - 1,
-        )
-        correlation = sps.correlate(
-            original_small,
-            karaoke_small,
-            mode="full",
-            method="fft",
-        )
-        lags = sps.correlation_lags(
-            len(original_small), len(karaoke_small), mode="full"
-        )
-        usable = np.abs(lags) <= max_lag
-        lag_small = int(lags[usable][np.argmax(correlation[usable])])
-        lag = int(round(lag_small * SAMPLE_RATE / analysis_sr))
-        if lag > 0:
-            original = original[lag:]
-        elif lag < 0:
-            karaoke = karaoke[-lag:]
-        length = min(len(original), len(karaoke))
-        if length < 2_048:
-            raise ValueError("位置合わせ後の音声が短すぎます。")
-        return original[:length], karaoke[:length], SAMPLE_RATE, lag / SAMPLE_RATE, None
+        return original, karaoke, SAMPLE_RATE, 0.0, time_map
 
     original, sr = librosa.load(original_file, sr=SAMPLE_RATE, mono=True)
     karaoke, _ = librosa.load(karaoke_file, sr=SAMPLE_RATE, mono=True)
@@ -669,6 +938,242 @@ def align_audio(
     return original[:length], karaoke[:length], sr, lag / sr, None
 
 
+def _extract_vocals_chunked(
+    original: np.ndarray,
+    karaoke: np.ndarray,
+    scale_factor: float,
+    time_map: tuple[np.ndarray, np.ndarray, np.ndarray] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """重なり付き小区間STFTで、周波数別差分を512MB内に収める。"""
+    output_length = len(original) if time_map is not None else min(len(original), len(karaoke))
+    if output_length < 2_048:
+        raise ValueError("差分抽出に必要な音声が短すぎます。")
+    original = np.asarray(original[:output_length], dtype=np.float32)
+    karaoke = np.asarray(karaoke, dtype=np.float32)
+    natural_output = np.zeros(output_length, dtype=np.float32)
+    enhanced_output = np.zeros(output_length, dtype=np.float32)
+    overlap_weight = np.zeros(output_length, dtype=np.float32)
+    # 6秒ごとに処理し、前後0.75秒をクロスフェードする。
+    # 4分音源でもピークメモリに十分な余白を残しつつ、継ぎ目を隠す。
+    chunk_samples = 6 * SAMPLE_RATE
+    overlap_samples = 3 * SAMPLE_RATE // 4
+    step_samples = chunk_samples - overlap_samples
+    starts = list(range(0, output_length, step_samples))
+    if starts and output_length - starts[-1] < 2_048:
+        starts[-1] = max(0, output_length - chunk_samples)
+        starts = sorted(set(starts))
+    n_fft = 2_048
+    hop_length = 512
+    original_map_times = karaoke_map_times = map_confidence = None
+    if time_map is not None:
+        original_map_times, karaoke_map_times, map_confidence = time_map
+
+    for start in starts:
+        end = min(output_length, start + chunk_samples)
+        original_chunk = original[start:end]
+        sample_times = (
+            start + np.arange(end - start, dtype=np.float64)
+        ) / SAMPLE_RATE
+        if time_map is None:
+            karaoke_chunk = karaoke[start:end]
+            if len(karaoke_chunk) < len(original_chunk):
+                karaoke_chunk = np.pad(
+                    karaoke_chunk,
+                    (0, len(original_chunk) - len(karaoke_chunk)),
+                )
+        else:
+            mapped_times = np.interp(
+                sample_times,
+                original_map_times,
+                karaoke_map_times,
+                left=karaoke_map_times[0],
+                right=karaoke_map_times[-1],
+            )
+            mapped_positions = np.clip(
+                mapped_times * SAMPLE_RATE,
+                0,
+                max(0, len(karaoke) - 1),
+            )
+            left_indices = np.floor(mapped_positions).astype(np.int64)
+            right_indices = np.minimum(left_indices + 1, len(karaoke) - 1)
+            fractions = (mapped_positions - left_indices).astype(np.float32)
+            karaoke_chunk = (
+                karaoke[left_indices] * (np.float32(1.0) - fractions)
+                + karaoke[right_indices] * fractions
+            ).astype(np.float32, copy=False)
+
+        frequencies, frame_times, original_stft = sps.stft(
+            original_chunk,
+            fs=SAMPLE_RATE,
+            window="hann",
+            nperseg=n_fft,
+            noverlap=n_fft - hop_length,
+            nfft=n_fft,
+            boundary="zeros",
+            padded=True,
+        )
+        _, _, karaoke_stft = sps.stft(
+            karaoke_chunk,
+            fs=SAMPLE_RATE,
+            window="hann",
+            nperseg=n_fft,
+            noverlap=n_fft - hop_length,
+            nfft=n_fft,
+            boundary="zeros",
+            padded=True,
+        )
+        original_stft = original_stft.astype(np.complex64, copy=False)
+        karaoke_stft = karaoke_stft.astype(np.complex64, copy=False)
+        original_magnitude = np.abs(original_stft).astype(np.float32, copy=False)
+        karaoke_magnitude = np.abs(karaoke_stft).astype(np.float32, copy=False)
+        if time_map is None:
+            subtraction_weight: float | np.ndarray = 1.0
+        else:
+            global_frame_times = frame_times + start / SAMPLE_RATE
+            frame_confidence = np.interp(
+                global_frame_times,
+                original_map_times,
+                map_confidence,
+                left=0.0,
+                right=0.0,
+            ).astype(np.float32, copy=False)
+            subtraction_weight = np.clip(
+                (frame_confidence - np.float32(0.35)) / np.float32(0.35),
+                0.0,
+                1.0,
+            )
+            if subtraction_weight.size >= 31:
+                subtraction_weight = sps.medfilt(
+                    subtraction_weight, kernel_size=31
+                ).astype(np.float32, copy=False)
+            subtraction_weight = subtraction_weight[np.newaxis, :]
+
+        effective_karaoke = karaoke_magnitude * subtraction_weight
+        subtraction_scale = np.float32(
+            scale_factor * (1.18 if scale_factor > 0.3 else 1.0)
+        )
+        vocal_magnitude = np.maximum(
+            original_magnitude - effective_karaoke * subtraction_scale,
+            0,
+        ).astype(np.float32, copy=False)
+        voice_likelihood: np.ndarray | None = None
+        if scale_factor > 0.3:
+            baseline_magnitude = np.maximum(
+                original_magnitude - effective_karaoke * np.float32(0.3),
+                0,
+            ).astype(np.float32, copy=False)
+            epsilon = max(float(np.max(original_magnitude)) * 1e-7, 1e-10)
+            evidence_magnitude = np.maximum(
+                original_magnitude - effective_karaoke * np.float32(0.85),
+                0,
+            ).astype(np.float32, copy=False)
+            residual_ratio = np.clip(
+                evidence_magnitude / (original_magnitude + np.float32(epsilon)),
+                0,
+                1,
+            ).astype(np.float32, copy=False)
+            smooth_ratio = ndi.uniform_filter(
+                residual_ratio,
+                size=(5, 9),
+                mode="nearest",
+            ).astype(np.float32, copy=False)
+            voice_evidence = np.maximum(
+                smooth_ratio,
+                residual_ratio * np.float32(0.72),
+            )
+            vocal_band_prior = np.interp(
+                frequencies,
+                [0, 70, 120, 5_500, 9_000, SAMPLE_RATE / 2],
+                [0.18, 0.35, 1.0, 1.0, 0.55, 0.18],
+            ).astype(np.float32)[:, np.newaxis]
+            voice_likelihood = np.clip(
+                (voice_evidence - np.float32(0.08)) / np.float32(0.62),
+                0,
+                1,
+            ) * vocal_band_prior
+            protection_floor = np.float32(0.10) + np.float32(0.84) * np.power(
+                voice_likelihood,
+                np.float32(0.6),
+            )
+            vocal_magnitude = np.maximum(
+                vocal_magnitude,
+                baseline_magnitude * protection_floor,
+            ).astype(np.float32, copy=False)
+
+        phase = original_stft / np.maximum(
+            original_magnitude,
+            np.float32(1e-12),
+        )
+        natural_stft = (vocal_magnitude * phase).astype(np.complex64, copy=False)
+        _, natural_chunk = sps.istft(
+            natural_stft,
+            fs=SAMPLE_RATE,
+            window="hann",
+            nperseg=n_fft,
+            noverlap=n_fft - hop_length,
+            nfft=n_fft,
+            input_onesided=True,
+            boundary=True,
+        )
+        if voice_likelihood is None:
+            voice_likelihood = np.interp(
+                frequencies,
+                [0, 70, 120, 5_500, 9_000, SAMPLE_RATE / 2],
+                [0.0, 0.2, 0.75, 0.75, 0.3, 0.0],
+            ).astype(np.float32)[:, np.newaxis]
+        vocal_emphasis_gain = np.power(
+            np.float32(10.0),
+            (
+                np.float32(3.0)
+                * np.power(voice_likelihood, np.float32(0.8))
+                / np.float32(20.0)
+            ),
+        ).astype(np.float32, copy=False)
+        enhanced_stft = (
+            vocal_magnitude * vocal_emphasis_gain * phase
+        ).astype(np.complex64, copy=False)
+        _, enhanced_chunk = sps.istft(
+            enhanced_stft,
+            fs=SAMPLE_RATE,
+            window="hann",
+            nperseg=n_fft,
+            noverlap=n_fft - hop_length,
+            nfft=n_fft,
+            input_onesided=True,
+            boundary=True,
+        )
+        segment_length = end - start
+        natural_chunk = np.asarray(natural_chunk[:segment_length], dtype=np.float32)
+        enhanced_chunk = np.asarray(enhanced_chunk[:segment_length], dtype=np.float32)
+        if len(natural_chunk) < segment_length:
+            natural_chunk = np.pad(
+                natural_chunk, (0, segment_length - len(natural_chunk))
+            )
+        if len(enhanced_chunk) < segment_length:
+            enhanced_chunk = np.pad(
+                enhanced_chunk, (0, segment_length - len(enhanced_chunk))
+            )
+        weight = np.ones(segment_length, dtype=np.float32)
+        fade_length = min(overlap_samples, segment_length)
+        if start > 0:
+            fade = np.linspace(0, np.pi / 2, fade_length, dtype=np.float32)
+            weight[:fade_length] *= np.sin(fade) ** 2
+        if end < output_length:
+            fade = np.linspace(0, np.pi / 2, fade_length, dtype=np.float32)
+            weight[-fade_length:] *= np.cos(fade) ** 2
+        natural_output[start:end] += natural_chunk * weight
+        enhanced_output[start:end] += enhanced_chunk * weight
+        overlap_weight[start:end] += weight
+
+    usable_weight = np.maximum(overlap_weight, np.float32(1e-7))
+    natural_output /= usable_weight
+    enhanced_output /= usable_weight
+    return (
+        _normalise(natural_output).astype(np.float32, copy=False),
+        _normalise(enhanced_output).astype(np.float32, copy=False),
+    )
+
+
 def extract_vocals(
     original: np.ndarray,
     karaoke: np.ndarray,
@@ -677,27 +1182,12 @@ def extract_vocals(
 ) -> tuple[np.ndarray, np.ndarray]:
     """区間別の時刻対応を反映したSTFTスペクトル減算でMR成分を抑える。"""
     if LOW_MEMORY_MODE:
-        # 仮運用中のRender Freeでは、librosa/NumbaのJIT初期化だけで
-        # 512 MBを超えるため、位置合わせ済み波形を直接減算する。
-        # float32のまま処理し、中間スペクトル行列を作らない。
-        length = min(len(original), len(karaoke))
-        if length < 2_048:
-            raise ValueError("差分抽出に必要な音声が短すぎます。")
-        original_low_memory = np.asarray(original[:length], dtype=np.float32)
-        karaoke_low_memory = np.asarray(karaoke[:length], dtype=np.float32)
-        subtraction_scale = np.float32(scale_factor * 0.92)
-        natural_vocals = _normalise(
-            original_low_memory - karaoke_low_memory * subtraction_scale
-        ).astype(np.float32, copy=False)
-        # 軽いソフトクリップで小さい声を前に出し、ピークだけを抑える。
-        emphasis = np.float32(1.35)
-        enhanced_vocals = np.tanh(natural_vocals * emphasis).astype(
-            np.float32, copy=False
+        return _extract_vocals_chunked(
+            original,
+            karaoke,
+            scale_factor,
+            time_map,
         )
-        enhanced_vocals = _normalise(enhanced_vocals).astype(
-            np.float32, copy=False
-        )
-        return natural_vocals, enhanced_vocals
 
     n_fft, hop_length = 2_048, 512
     original_stft = librosa.stft(original, n_fft=n_fft, hop_length=hop_length)
