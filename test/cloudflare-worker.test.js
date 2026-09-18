@@ -27,7 +27,7 @@ test('extractInitialPlayerResponse uses the last valid assignment', () => {
   assert.equal(extractInitialPlayerResponse(html).playabilityStatus.status, 'OK');
 });
 
-test('selectBestAudio prefers non-DRC and then highest bitrate', () => {
+test('selectBestAudio prefers non-DRC Opus/WebM and then highest bitrate', () => {
   const selected = selectBestAudio({ streamingData: { adaptiveFormats: [
     { itag: 1, mimeType: 'video/mp4', url: 'https://example.test/video' },
     { itag: 2, mimeType: 'audio/webm', url: 'https://example.test/drc', bitrate: 200_000, isDrc: true },

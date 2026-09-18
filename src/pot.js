@@ -75,10 +75,12 @@ export async function createWebPoMinter() {
   const [integrityToken, estimatedTtlSecs, mintRefreshThreshold, websafeFallbackToken] =
     await integrityResponse.json();
 
-  return WebPoMinter.create({
+  const poMinter = await WebPoMinter.create({
     integrityToken,
     estimatedTtlSecs,
     mintRefreshThreshold,
     websafeFallbackToken,
   }, webPoSignalOutput);
+  poMinter.visitorData = config.INNERTUBE_CONTEXT?.client?.visitorData || config.VISITOR_DATA || null;
+  return poMinter;
 }

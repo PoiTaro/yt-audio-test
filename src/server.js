@@ -251,7 +251,10 @@ async function handlePoToken(request, response) {
     }
     const poMinter = await poMinterPromise;
     const poToken = await poMinter.mintAsWebsafeString(videoId);
-    return jsonResponse(response, 200, { poToken });
+    const visitorData = poMinter.visitorData;
+    if (!visitorData) throw new Error('BotGuard session has no visitor data');
+    const playerPoToken = await poMinter.mintAsWebsafeString(visitorData);
+    return jsonResponse(response, 200, { poToken, playerPoToken, visitorData });
   } catch (error) {
     poMinterPromise = null;
     throw error;

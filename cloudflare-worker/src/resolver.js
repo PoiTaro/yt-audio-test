@@ -9,6 +9,36 @@ const INNERTUBE_CLIENTS = [
     extra: { androidSdkVersion: 32, osName: 'Android', osVersion: '12L', platform: 'MOBILE', deviceMake: 'Oculus', deviceModel: 'Quest 3' },
   },
   {
+    name: 'ANDROID',
+    id: '3',
+    version: '21.03.36',
+    userAgent: 'com.google.android.youtube/21.03.36(Linux; U; Android 16; en_US; SM-S908E Build/TP1A.220624.014) gzip',
+    extra: { androidSdkVersion: 36, osName: 'Android', osVersion: '16', platform: 'MOBILE', deviceMake: 'Samsung', deviceModel: 'SM-S908E' },
+  },
+  {
+    name: 'MWEB',
+    id: '2',
+    version: '2.20260205.04.01',
+    userAgent: MOBILE_USER_AGENT,
+    extra: { osName: 'Android', osVersion: '14', platform: 'MOBILE' },
+  },
+  {
+    name: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
+    id: '85',
+    version: '2.0',
+    userAgent: 'Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version',
+    extra: { platform: 'TV' },
+    embedUrl: 'https://www.youtube.com/',
+  },
+  {
+    name: 'WEB_EMBEDDED_PLAYER',
+    id: '56',
+    version: '1.20260206.01.00',
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36',
+    extra: { platform: 'DESKTOP' },
+    embedUrl: 'https://www.youtube.com/',
+  },
+  {
     name: 'IOS',
     id: '5',
     version: '20.11.6',
@@ -104,6 +134,12 @@ export function selectBestAudio(playerResponse) {
   return [...formats].sort((a, b) => {
     const drcScore = Number(Boolean(a.isDrc)) - Number(Boolean(b.isDrc));
     if (drcScore) return drcScore;
+    const webmScore = Number(!a.mimeType?.startsWith('audio/webm'))
+      - Number(!b.mimeType?.startsWith('audio/webm'));
+    if (webmScore) return webmScore;
+    if (a.mimeType?.startsWith('audio/mp4') && b.mimeType?.startsWith('audio/mp4')) {
+      return (a.averageBitrate ?? a.bitrate ?? 0) - (b.averageBitrate ?? b.bitrate ?? 0);
+    }
     return (b.averageBitrate ?? b.bitrate ?? 0) - (a.averageBitrate ?? a.bitrate ?? 0);
   })[0];
 }
@@ -144,7 +180,7 @@ async function fetchWatchResponse(videoId, diagnostics) {
   return { html, playerResponse, playerId: playerIdFrom(playerResponse?.assets?.js) || playerIdFrom(html) };
 }
 
-async function fetchInnerTubeResponse(videoId, diagnostics) {
+async function fetchInnerTubeResponse(videoId, diagnostics, integrity) {
   diagnostics.innerTube = [];
   for (const client of INNERTUBE_CLIENTS) {
     const response = await fetch(`https://www.youtube.com/youtubei/v1/player?prettyPrint=false&key=${INNERTUBE_API_KEY}`, {
@@ -157,26 +193,70 @@ async function fetchInnerTubeResponse(videoId, diagnostics) {
         Origin: 'https://www.youtube.com',
       },
       body: JSON.stringify({
-        context: { client: { hl: 'en', gl: 'US', clientName: client.name, clientVersion: client.version, userAgent: client.userAgent, ...client.extra } },
+        context: {
+          client: {
+            hl: 'en',
+            gl: 'US',
+            clientName: client.name,
+            clientVersion: client.version,
+            userAgent: client.userAgent,
+            ...(integrity?.visitorData ? { visitorData: integrity.visitorData } : {}),
+            ...client.extra,
+          },
+          ...(client.embedUrl ? { thirdParty: { embedUrl: client.embedUrl } } : {}),
+        },
         videoId,
         contentCheckOk: true,
         racyCheckOk: true,
         playbackContext: { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } },
+        ...(integrity?.playerPoToken
+          ? { serviceIntegrityDimensions: { poToken: integrity.playerPoToken } }
+          : {}),
       }),
     });
     let result = {};
     try { result = await response.json(); } catch { /* Record the empty response below. */ }
-    const audioFormats = (result?.streamingData?.adaptiveFormats ?? []).filter((format) => format.mimeType?.startsWith('audio/')).length;
+    const audioFormats = (result?.streamingData?.adaptiveFormats ?? [])
+      .filter((format) => format.mimeType?.startsWith('audio/'));
+    const usableAudioFormats = audioFormats
+      .filter((format) => format.url || format.signatureCipher || format.cipher);
     diagnostics.innerTube.push({
       client: client.name,
       status: response.status,
       playability: result?.playabilityStatus?.status ?? null,
       reason: result?.playabilityStatus?.reason ?? null,
-      audioFormats,
+      audioFormats: audioFormats.length,
+      usableAudioFormats: usableAudioFormats.length,
     });
-    if (audioFormats > 0) return result;
+    if (usableAudioFormats.length > 0) return result;
   }
   return null;
+}
+
+async function fetchPoTokens(videoId, renderDecipherUrl, decipherToken, diagnostics) {
+  const poTokenUrl = new URL(renderDecipherUrl);
+  poTokenUrl.pathname = '/api/pot';
+  poTokenUrl.search = '';
+  const response = await fetch(poTokenUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(decipherToken ? { Authorization: `Bearer ${decipherToken}` } : {}),
+    },
+    body: JSON.stringify({ videoId }),
+  });
+  let result = {};
+  try { result = await response.json(); } catch { /* Normalize below. */ }
+  diagnostics.poToken = {
+    status: response.status,
+    gvs: Boolean(result.poToken),
+    player: Boolean(result.playerPoToken),
+    visitorData: Boolean(result.visitorData),
+  };
+  if (!response.ok || !result.poToken || !result.playerPoToken || !result.visitorData) {
+    throw new ResolverError('PO_TOKEN_FAILED', result.error || `PO Token APIがHTTP ${response.status}を返しました。`, diagnostics);
+  }
+  return result;
 }
 
 async function fetchFallbackPlayerId() {
@@ -221,12 +301,13 @@ export async function resolveAndFetchAudio({
   const diagnostics = { videoId };
   let resolution = cachedResolution;
   if (!resolution) {
+    const integrity = await fetchPoTokens(videoId, renderDecipherUrl, decipherToken, diagnostics);
     const watch = await fetchWatchResponse(videoId, diagnostics);
     let playerResponse = watch.playerResponse;
     try {
       selectBestAudio(playerResponse);
     } catch {
-      playerResponse = await fetchInnerTubeResponse(videoId, diagnostics);
+      playerResponse = await fetchInnerTubeResponse(videoId, diagnostics, integrity);
     }
     if (!playerResponse) {
       const status = diagnostics.watch?.playability || diagnostics.innerTube?.at(-1)?.playability || 'UNPLAYABLE';
@@ -268,23 +349,6 @@ export async function resolveAndFetchAudio({
         throw new ResolverError('DECIPHER_FAILED', deciphered.error || `変換APIがHTTP ${decipherResponse.status}を返しました。`, diagnostics);
       }
     }
-    const poTokenUrl = new URL(renderDecipherUrl);
-    poTokenUrl.pathname = '/api/pot';
-    poTokenUrl.search = '';
-    const poTokenResponse = await fetch(poTokenUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(decipherToken ? { Authorization: `Bearer ${decipherToken}` } : {}),
-      },
-      body: JSON.stringify({ videoId }),
-    });
-    let poTokenResult = {};
-    try { poTokenResult = await poTokenResponse.json(); } catch { /* Normalize below. */ }
-    diagnostics.poToken = { status: poTokenResponse.status, success: Boolean(poTokenResult.poToken) };
-    if (!poTokenResponse.ok || !poTokenResult.poToken) {
-      throw new ResolverError('PO_TOKEN_FAILED', poTokenResult.error || `PO Token APIがHTTP ${poTokenResponse.status}を返しました。`, diagnostics);
-    }
     const resolvedStreamUrl = new URL(deciphered.url);
     const totalBytes = Number(format.contentLength || resolvedStreamUrl.searchParams.get('clen'));
     if (!Number.isSafeInteger(totalBytes) || totalBytes <= 0) {
@@ -295,7 +359,7 @@ export async function resolveAndFetchAudio({
       format: diagnostics.format,
       totalBytes,
       cpn: crypto.randomUUID().replaceAll('-', '').slice(0, 16),
-      poToken: poTokenResult.poToken,
+      poToken: integrity.poToken,
     };
   } else {
     diagnostics.cacheHit = true;
