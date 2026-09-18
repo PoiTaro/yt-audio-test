@@ -1588,10 +1588,26 @@ def _extract(
     enhanced_name = _unique_name("extracted_vocals_enhanced.wav")
     natural_path = MEDIA_DIR / natural_name
     enhanced_path = MEDIA_DIR / enhanced_name
-    sf.write(natural_path, natural_vocals, sample_rate)
+    # 自然版のPCM保存はI/O中心なので、強調版のDSPと同時に進める。
+    # 出力内容は同じまま、直列待ちだけを取り除く。
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        natural_future = executor.submit(
+            sf.write,
+            natural_path,
+            natural_vocals,
+            sample_rate,
+            subtype="PCM_16",
+        )
+        enhanced_future = executor.submit(
+            _finish_vocal_enhancement,
+            enhanced_vocals,
+            sample_rate,
+            enhanced_path,
+        )
+        natural_future.result()
+        enhanced_future.result()
     del natural_vocals
     _trim_process_memory()
-    _finish_vocal_enhancement(enhanced_vocals, sample_rate, enhanced_path)
     if progress:
         progress(96, "再生データを仕上げています")
     result = {
