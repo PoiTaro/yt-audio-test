@@ -2,29 +2,9 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createResolver, describeFormat, selectBestAudio } from '../src/core.js';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const port = 18181;
-let resolved = null;
-
-async function resolveAudio() {
-  if (resolved) return resolved;
-  const youtube = await createResolver(path.join(directory, '.cache'), {
-    client: 'IOS',
-    generateSessionLocally: true,
-    enableSessionCache: false,
-  });
-  const info = await youtube.getBasicInfo('jNQXAC9IVRw');
-  if (info.playability_status?.status !== 'OK') {
-    throw new Error(info.playability_status?.reason || info.playability_status?.status || 'Player failed');
-  }
-  const format = selectBestAudio(info.streaming_data?.adaptive_formats ?? []);
-  const streamUrl = await format.decipher(youtube.session.player);
-  const description = describeFormat(format);
-  resolved = { success: true, streamUrl, itag: description.itag, codec: description.codec };
-  return resolved;
-}
 
 function send(response, status, type, body) {
   response.writeHead(status, { 'content-type': type, 'cache-control': 'no-store' });
@@ -36,12 +16,11 @@ const server = http.createServer(async (request, response) => {
     if (request.url === '/' || request.url === '/index.html') {
       return send(response, 200, 'text/html; charset=utf-8', await readFile(path.join(directory, 'index.html')));
     }
-    if (request.url === '/client.js') {
-      return send(response, 200, 'text/javascript; charset=utf-8', await readFile(path.join(directory, 'client.js')));
+    if (request.url === '/full-client.js') {
+      return send(response, 200, 'text/javascript; charset=utf-8', await readFile(path.join(directory, 'full-client.js')));
     }
-    if (request.url === '/resolve') {
-      const body = JSON.stringify(await resolveAudio());
-      return send(response, 200, 'application/json; charset=utf-8', body);
+    if (request.url === '/youtubei.js') {
+      return send(response, 200, 'text/javascript; charset=utf-8', await readFile(path.join(directory, '..', 'node_modules', 'youtubei.js', 'bundle', 'browser.js')));
     }
     if (request.url === '/result' && request.method === 'POST') {
       const chunks = [];
@@ -49,7 +28,10 @@ const server = http.createServer(async (request, response) => {
       const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       console.log(`BROWSER_PROBE_RESULT=${JSON.stringify(result)}`);
       send(response, 200, 'application/json', '{"ok":true}');
-      setTimeout(() => server.close(), 250);
+      setTimeout(() => {
+        server.closeAllConnections();
+        server.close();
+      }, 250);
       return;
     }
     send(response, 404, 'text/plain', 'Not found');

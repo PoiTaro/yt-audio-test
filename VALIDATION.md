@@ -89,14 +89,16 @@ YouTubeへSession dataを問い合わせずVisitor Dataをローカル生成す�
 
 ## ブラウザ拡張経由の検証
 
-`LuanRT/ytc-bridge` 1.2.0（commit `8f53620fb48daf197e04f69a0b5406132eaf6f8e`）を隔離したEdgeプロファイルへ読み込み、ローカル回線で解決したaudio-only URLを拡張のService WorkerからRange取得しました。
+`LuanRT/ytc-bridge` 1.2.0（commit `8f53620fb48daf197e04f69a0b5406132eaf6f8e`、無改造）を隔離したEdgeプロファイルへ読み込みました。YouTube.jsのブラウザ版へ拡張の`proxyFetch`を渡し、URL解決から音声取得までブラウザ内で実行しました。
 
 | 項目 | 結果 |
 |---|---|
 | 拡張検出 | 成功 |
+| ブラウザ内InnerTube解決 | 成功（`ANDROID_VR`） |
+| playability | `OK` |
 | GoogleVideo | HTTP 206 |
 | 取得量 | 8192 bytes |
 | Content-Type | `audio/mp4` |
 | format | itag 140 / `mp4a.40.2` |
 
-この結果から、公開RenderサーバーでYouTube取得を完結させるのではなく、ユーザー側ブラウザ拡張で解決・音声取得し、取得済み音声データだけをRenderのMR処理APIへアップロードする構成が実行可能な突破口です。期限付きURLだけをRenderへ渡す方式では、再びRender IPからGoogleVideoへアクセスするため効果がありません。
+この結果から、公開RenderサーバーでYouTube取得を完結させるのではなく、ユーザー側ブラウザ拡張でInnerTube解決・音声取得し、取得済み音声データだけをRenderのMR処理APIへアップロードする構成が実行可能な突破口です。期限付きURLだけをRenderへ渡す方式では、再びRender IPからGoogleVideoへアクセスするため効果がありません。

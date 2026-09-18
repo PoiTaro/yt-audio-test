@@ -115,6 +115,6 @@ RenderではDocker Web Serviceとしてデプロイしてください。`render.
 node browser-probe/server.js
 ```
 
-拡張を入れたブラウザで`http://127.0.0.1:18181`を開くと、固定公開動画のaudio-only URLをローカルで解決し、先頭8KiBを拡張経由で取得します。実測ではHTTP 206、8192 bytes、`audio/mp4`、itag 140で成功しました。
+拡張を入れたブラウザで`http://127.0.0.1:18181`を開くと、YouTube.jsのブラウザ版が固定公開動画のaudio-only URLをブラウザ内で解決し、先頭8KiBを拡張経由で取得します。Node側は静的ファイル配信と結果受信だけで、YouTubeへの解決要求は行いません。実測では無改造の`ytc-bridge` 1.2.0と`ANDROID_VR`でplayability `OK`、HTTP 206、8192 bytes、`audio/mp4`、itag 140として成功しました。
 
 本番統合では、期限付きURLをRenderへ送るのではなく、拡張が音声バイトを取得してRenderへアップロードします。これによりYouTube/GoogleVideoへの接続はユーザー側ネットワークで完結し、RenderはMR処理だけを担当できます。
