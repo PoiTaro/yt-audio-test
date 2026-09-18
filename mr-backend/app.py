@@ -1007,7 +1007,9 @@ def _extract_vocals_chunked(
         starts[-1] = max(0, output_length - chunk_samples)
         starts = sorted(set(starts))
     n_fft = 2_048
-    hop_length = 512
+    # Hann窓の完全再構成条件を満たす50%重複。FFTサイズと周波数分解能は
+    # 維持したまま、75%重複で重ねていた同じ音声領域の再計算を半減する。
+    hop_length = 1_024
     original_map_times = karaoke_map_times = map_confidence = None
     if time_map is not None:
         original_map_times, karaoke_map_times, map_confidence = time_map
@@ -1086,9 +1088,9 @@ def _extract_vocals_chunked(
                 0.0,
                 1.0,
             )
-            if subtraction_weight.size >= 31:
+            if subtraction_weight.size >= 15:
                 subtraction_weight = sps.medfilt(
-                    subtraction_weight, kernel_size=31
+                    subtraction_weight, kernel_size=15
                 ).astype(np.float32, copy=False)
             subtraction_weight = subtraction_weight[np.newaxis, :]
 
