@@ -1,0 +1,25 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "yt-audio-regional-resolver",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-18",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "REGIONAL_RESOLVER",
+        "class_name": "RegionalResolver"
+      }
+    ]
+  },
+  "exports": {
+    "RegionalResolver": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "vars": {
+    "PLACEMENT_EPOCH": "v1",
+    "RESOLVER_REGIONS": "apac-ne,apac-se,weur,enam",
+    "RENDER_DECIPHER_URL": "https://yt-audio-test.onrender.com/api/decipher"
+  }
+}

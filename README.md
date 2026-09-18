@@ -120,6 +120,17 @@ node scripts/cloudflare-playground-probe.mjs VIDEO_ID https://YOUR-RENDER-SERVIC
 
 固定公開動画では、Cloudflare watch応答が`OK`だった試行はすべてHTTP 206の音声取得まで完走しました。ただしCloudflare出口によって`LOGIN_REQUIRED`または429になる試行があり、同じWorker内の再試行やYouTubeホスト・InnerTubeクライアント変更では解消しませんでした。詳しい実測値は`VALIDATION.md`に記録しています。
 
+## 地域分散Durable Object
+
+`cloudflare-worker/`に、本番候補となるCoordinator Workerと地域固定Durable Objectを実装しています。Coordinatorは`apac-ne`、`apac-se`、`weur`、`enam`を順に試し、最初に成功した音声レスポンスをストリームします。視聴ページ取得とGoogleVideo取得を同じDurable Objectで行うため、期限付きURLを別のネットワーク出口へ持ち出しません。
+
+```powershell
+npm run worker:check
+npm run worker:dev
+```
+
+ブラウザへ共有Secretを置かないため、公開時はPythonバックエンドからWorkerの`/audio`を呼びます。利用者側の操作は従来どおりYouTube URLの貼り付けだけです。詳しい設定は`cloudflare-worker/README.md`を参照してください。
+
 ## ブラウザ側取得の実証
 
 `browser-probe/`は、Chromium拡張のService WorkerからGoogleVideoをRange取得できるかを確認する最小ハーネスです。別途[LuanRT/ytc-bridge](https://github.com/LuanRT/ytc-bridge)をビルドして未パック拡張として読み込み、次を実行します。

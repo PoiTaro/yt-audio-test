@@ -130,3 +130,20 @@ Googleアカウント、Cookie、OAuth、外部ダウンロードAPI、yt-dlpは
 一方、残り4回はCloudflareの出口単位でwatch応答が`LOGIN_REQUIRED`になりました。同一Worker内で5回再試行、`www`・`m`・embed・`youtube-nocookie`・musicのホスト切替、`ANDROID_VR`・`IOS`・埋め込み系InnerTubeへのフォールバックを行っても、その出口では改善しませんでした。3つの匿名Preview Workerを同時実行した試験も結果が完全に相関し、単純な複製では別の出口になりませんでした。連続負荷後にはHTTP 429も確認しています。
 
 したがって、この構成は「アカウントなしでサーバー側だけから音声を取れる」ことの実証には成功しましたが、現時点の単一Cloudflare Workerだけでは成功率が安定せず、そのまま本番採用できる段階ではありません。次の実装候補は、Cloudflareの異なる配置を持つ複数の自前Worker/Durable Objectを用意して出口を分散し、成功した経路だけを採用する方法です。これも利用者の操作はURL貼り付けだけで、Googleアカウントは不要です。
+
+## 地域分散Durable Object実配置検証
+
+検証日: 2026-09-18
+
+Wranglerの匿名一時アカウントへCoordinator WorkerとSQLite-backed Durable Objectを配置し、`jNQXAC9IVRw`を4地域で検証しました。Cloudflareアカウント、Googleアカウント、Cookieは使用していません。
+
+| 配置ヒント | watch応答 | audio format | 後続結果 |
+|---|---|---:|---|
+| `apac-ne` | `LOGIN_REQUIRED` | 0 | Player段階で停止 |
+| `apac-se` | `OK` | 19 | itag 140選択、旧RenderがPOSTを405で拒否 |
+| `weur` | `OK` | 19 | itag 140選択、旧Renderが502を返却 |
+| `enam` | `OK` | 19 | itag 140選択、旧RenderがPOSTを405で拒否 |
+
+3/4地域でPlayer応答とaudio-only format取得に成功し、単純なWorker複製と違って配置地域ごとに結果が分かれました。これにより、Durable Objectの配置ヒントを使った地域分散が`LOGIN_REQUIRED`出口を避ける実用的な候補であることを確認できました。
+
+この試験時点の公開Renderは`POST /api/decipher`を含まない旧デプロイだったため、GoogleVideo取得までの最終確認は新版Renderの反映後に行います。地域側の失敗と変換サービス側の失敗は診断JSONで別々に記録されます。

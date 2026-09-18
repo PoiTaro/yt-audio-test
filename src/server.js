@@ -190,9 +190,20 @@ async function handleDecipher(request, response) {
     return jsonResponse(response, 400, { error: 'Invalid playerId' });
   }
 
+  const directUrl = typeof body.url === 'string' && body.url ? body.url : undefined;
+  const signatureCipher = typeof body.signatureCipher === 'string' && body.signatureCipher
+    ? body.signatureCipher
+    : undefined;
+  const cipher = typeof body.cipher === 'string' && body.cipher ? body.cipher : undefined;
+  const cipherValue = signatureCipher || cipher;
+  const embeddedUrl = cipherValue ? new URLSearchParams(cipherValue).get('url') : null;
+  if (!directUrl && !cipherValue) {
+    return jsonResponse(response, 400, { error: 'url, signatureCipher, or cipher is required' });
+  }
+
   let rawUrl;
   try {
-    rawUrl = new URL(String(body.url ?? ''));
+    rawUrl = new URL(directUrl || embeddedUrl || '');
   } catch {
     return jsonResponse(response, 400, { error: 'Invalid stream URL' });
   }
@@ -211,7 +222,7 @@ async function handleDecipher(request, response) {
       }));
   }
   const player = await playerCache.get(playerId);
-  const decipheredUrl = await player.decipher(rawUrl.toString());
+  const decipheredUrl = await player.decipher(directUrl, signatureCipher, cipher);
   const deciphered = new URL(decipheredUrl);
   return jsonResponse(response, 200, {
     playerId,

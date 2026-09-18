@@ -8,6 +8,8 @@
     "start": "node src/server.js",
     "probe": "node src/cli.js",
     "probe:html": "node src/html-cli.js",
+    "worker:check": "wrangler deploy --dry-run --config cloudflare-worker/wrangler.jsonc",
+    "worker:dev": "wrangler dev --local --config cloudflare-worker/wrangler.jsonc",
     "test": "node --test"
   },
   "engines": {
@@ -17,5 +19,8 @@
     "bgutils-js": "4.0.3",
     "jsdom": "24.1.3",
     "youtubei.js": "18.0.0"
+  },
+  "devDependencies": {
+    "wrangler": "4.134.0"
   }
 }
