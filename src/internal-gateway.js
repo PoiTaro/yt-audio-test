@@ -9,10 +9,13 @@ const host = process.env.INTERNAL_GATEWAY_HOST || '127.0.0.1';
 const port = Number(process.env.INTERNAL_GATEWAY_PORT || 10001);
 const helperTimeoutMs = Number(process.env.INTERNAL_HELPER_TIMEOUT_MS || 45_000);
 const maxQueue = Number(process.env.INTERNAL_HELPER_MAX_QUEUE || 2);
+const poCacheTtlMs = Number(process.env.INTERNAL_PO_CACHE_TTL_MS || 240_000);
 const bearerToken = process.env.DECIPHER_TOKEN || '';
 const cliPath = fileURLToPath(new URL('./internal-cli.js', import.meta.url));
 const signatureNonces = new Map();
 const pending = [];
+const poTokenCache = new Map();
+const poTokenInFlight = new Map();
 let active = false;
 
 function jsonResponse(response, statusCode, value) {
@@ -129,6 +132,31 @@ function enqueue(operation, rawBody) {
   });
 }
 
+function prunePoTokenCache(now = Date.now()) {
+  for (const [key, entry] of poTokenCache) {
+    if (entry.expiresAt <= now) poTokenCache.delete(key);
+  }
+  while (poTokenCache.size > 32) poTokenCache.delete(poTokenCache.keys().next().value);
+}
+
+function enqueuePoToken(rawBody, parsedBody) {
+  const videoId = String(parsedBody?.videoId ?? '');
+  if (!/^[A-Za-z0-9_-]{11}$/u.test(videoId)) return enqueue('pot', rawBody);
+  prunePoTokenCache();
+  const cached = poTokenCache.get(videoId);
+  if (cached) return Promise.resolve(cached.result);
+  if (poTokenInFlight.has(videoId)) return poTokenInFlight.get(videoId);
+  const operation = enqueue('pot', rawBody)
+    .then((result) => {
+      poTokenCache.set(videoId, { result, expiresAt: Date.now() + poCacheTtlMs });
+      prunePoTokenCache();
+      return result;
+    })
+    .finally(() => poTokenInFlight.delete(videoId));
+  poTokenInFlight.set(videoId, operation);
+  return operation;
+}
+
 const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
@@ -137,6 +165,8 @@ const server = http.createServer(async (request, response) => {
         status: 'ok',
         active,
         waiting: pending.length,
+        poTokenCacheEntries: poTokenCache.size,
+        poTokenInFlight: poTokenInFlight.size,
       });
     }
     const operations = new Map([
@@ -150,12 +180,16 @@ const server = http.createServer(async (request, response) => {
     if (!bearerMatches(request) && !signedRequestMatches(request, rawBody, url.pathname)) {
       return jsonResponse(response, 401, { error: 'Unauthorized' });
     }
+    let parsedBody;
     try {
-      JSON.parse(rawBody);
+      parsedBody = JSON.parse(rawBody);
     } catch {
       return jsonResponse(response, 400, { error: 'Invalid JSON body' });
     }
-    const result = await enqueue(operations.get(url.pathname), rawBody);
+    const operation = operations.get(url.pathname);
+    const result = operation === 'pot'
+      ? await enqueuePoToken(rawBody, parsedBody)
+      : await enqueue(operation, rawBody);
     return jsonResponse(response, 200, result);
   } catch (error) {
     if ((Number(error?.statusCode) || 500) >= 500) console.error(error?.stack || error);
