@@ -2178,7 +2178,7 @@ def _proxy_to_integrated_node(path: str):
         method="POST",
     )
     try:
-        with urlrequest.urlopen(upstream_request, timeout=50) as upstream:
+        with urlrequest.urlopen(upstream_request, timeout=90) as upstream:
             body = upstream.read(MAX_JSON_BODY_BYTES * 8)
             return Response(
                 body,
