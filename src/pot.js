@@ -41,7 +41,8 @@ export async function createWebPoMinter() {
   const pageHtml = await pageResponse.text();
   const configText = pageHtml.match(/ytcfg\.set\(({.+?})\);/s)?.[1];
   if (!configText) throw new Error('YouTube homepage did not contain ytcfg');
-  installBrowserGlobals(dom, JSON.parse(configText));
+  const config = JSON.parse(configText);
+  installBrowserGlobals(dom, config);
 
   const initialDataText = pageHtml.match(/window\.ytAtN\(\s*({[\s\S]*?})\s*\)/)?.[1];
   if (!initialDataText) throw new Error('YouTube homepage did not contain a BotGuard challenge');
