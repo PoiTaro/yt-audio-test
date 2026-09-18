@@ -193,6 +193,26 @@ function runDecipherWorker(rawBody) {
   });
 }
 
+async function releaseDecipherWorker() {
+  const child = decipherWorker;
+  if (!child || child.killed) return false;
+  if (decipherWorkerRequests.size) {
+    throw Object.assign(new Error('Decipher worker is still processing'), { statusCode: 409 });
+  }
+  await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve();
+    }, 3_000);
+    child.once('close', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    child.kill('SIGTERM');
+  });
+  return true;
+}
+
 function drainQueue() {
   if (active || pending.length === 0) return;
   active = true;
@@ -256,6 +276,9 @@ const server = http.createServer(async (request, response) => {
         helperMaxOldSpaceMb,
         decipherWorkerActive: Boolean(decipherWorker && !decipherWorker.killed),
       });
+    }
+    if (request.method === 'POST' && url.pathname === '/release') {
+      return jsonResponse(response, 200, { released: await releaseDecipherWorker() });
     }
     const operations = new Map([
       ['/api/pot', 'pot'],

@@ -4,7 +4,7 @@ import { Platform, Player } from 'youtubei.js';
 
 Platform.shim.eval = async (data) => new Function(data.output)();
 
-const idleExitMs = Number(process.env.INTERNAL_DECIPHER_IDLE_EXIT_MS || 8_000);
+const idleExitMs = Number(process.env.INTERNAL_DECIPHER_IDLE_EXIT_MS || 90_000);
 const playerCache = new Map();
 let idleTimer = null;
 let chain = Promise.resolve();
