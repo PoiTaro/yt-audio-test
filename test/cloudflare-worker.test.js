@@ -38,6 +38,14 @@ test('selectBestAudio prefers non-DRC Opus/WebM and then highest bitrate', () =>
   assert.equal(selected.itag, 4);
 });
 
+test('selectBestAudio can explicitly prefer AAC/MP4 as a fallback', () => {
+  const selected = selectBestAudio({ streamingData: { adaptiveFormats: [
+    { itag: 251, mimeType: 'audio/webm', url: 'https://example.test/opus', bitrate: 150_000 },
+    { itag: 140, mimeType: 'audio/mp4', url: 'https://example.test/aac', bitrate: 129_000 },
+  ] } }, 'mp4');
+  assert.equal(selected.itag, 140);
+});
+
 test('selectBestVideo chooses an audio-bearing MP4 preview', () => {
   const selected = selectBestVideo({ streamingData: { formats: [
     { itag: 17, mimeType: 'video/3gpp', audioQuality: 'AUDIO_QUALITY_LOW', height: 144, url: 'https://example.test/17' },

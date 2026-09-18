@@ -2,25 +2,32 @@ const MOBILE_USER_AGENT = 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWeb
 const INNERTUBE_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
 const INNERTUBE_CLIENTS = [
   {
-    name: 'MWEB',
-    id: '2',
-    version: '2.20260205.04.01',
-    userAgent: MOBILE_USER_AGENT,
-    extra: { osName: 'Android', osVersion: '14', platform: 'MOBILE' },
-  },
-  {
-    name: 'ANDROID_VR',
-    id: '28',
-    version: '1.65.10',
-    userAgent: 'com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip',
-    extra: { androidSdkVersion: 32, osName: 'Android', osVersion: '12L', platform: 'MOBILE', deviceMake: 'Oculus', deviceModel: 'Quest 3' },
-  },
-  {
     name: 'ANDROID',
     id: '3',
-    version: '21.03.36',
-    userAgent: 'com.google.android.youtube/21.03.36(Linux; U; Android 16; en_US; SM-S908E Build/TP1A.220624.014) gzip',
-    extra: { androidSdkVersion: 36, osName: 'Android', osVersion: '16', platform: 'MOBILE', deviceMake: 'Samsung', deviceModel: 'SM-S908E' },
+    version: '21.26.364',
+    userAgent: 'com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip',
+    extra: { androidSdkVersion: 30, osName: 'Android', osVersion: '11', platform: 'MOBILE' },
+  },
+  {
+    name: 'IOS',
+    id: '5',
+    version: '21.26.4',
+    userAgent: 'com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)',
+    extra: { osName: 'iPhone', osVersion: '18.3.2.22D82', platform: 'MOBILE', deviceMake: 'Apple', deviceModel: 'iPhone16,2' },
+  },
+  {
+    name: 'VISIONOS',
+    id: '101',
+    version: '1.02',
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15',
+    extra: { osName: 'visionOS', osVersion: '26.5.23O471', platform: 'DESKTOP', deviceMake: 'Apple', deviceModel: 'RealityDevice17,1' },
+  },
+  {
+    name: 'MWEB',
+    id: '2',
+    version: '2.20260708.05.00',
+    userAgent: 'Mozilla/5.0 (iPad; CPU OS 16_7_10 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1,gzip(gfe)',
+    extra: { osName: 'iOS', osVersion: '16.7.10', platform: 'MOBILE' },
   },
   {
     name: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
@@ -33,17 +40,10 @@ const INNERTUBE_CLIENTS = [
   {
     name: 'WEB_EMBEDDED_PLAYER',
     id: '56',
-    version: '1.20260206.01.00',
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36',
+    version: '2.20260708.00.00',
+    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15,gzip(gfe)',
     extra: { platform: 'DESKTOP' },
     embedUrl: 'https://www.youtube.com/',
-  },
-  {
-    name: 'IOS',
-    id: '5',
-    version: '20.11.6',
-    userAgent: 'com.google.ios.youtube/20.11.6 (iPhone10,4; U; CPU iOS 16_7_7 like Mac OS X)',
-    extra: { osName: 'iOS', osVersion: '16.7.7.20H330', platform: 'MOBILE', deviceMake: 'Apple', deviceModel: 'iPhone10,4' },
   },
 ];
 
@@ -127,18 +127,24 @@ export function extractInitialPlayerResponse(html) {
   throw new ResolverError('NO_PLAYER_RESPONSE', '視聴ページからPlayer応答を抽出できませんでした。');
 }
 
-export function selectBestAudio(playerResponse) {
+export function selectBestAudio(playerResponse, preferredContainer = 'auto') {
   const formats = (playerResponse?.streamingData?.adaptiveFormats ?? [])
     .filter((format) => format.mimeType?.startsWith('audio/') && (format.url || format.signatureCipher || format.cipher));
   if (!formats.length) throw new ResolverError('NO_AUDIO_FORMAT', 'audio-only formatがありません。');
   return [...formats].sort((a, b) => {
     const drcScore = Number(Boolean(a.isDrc)) - Number(Boolean(b.isDrc));
     if (drcScore) return drcScore;
+    if (preferredContainer === 'webm' || preferredContainer === 'mp4') {
+      const mimePrefix = `audio/${preferredContainer}`;
+      const preferredScore = Number(!a.mimeType?.startsWith(mimePrefix))
+        - Number(!b.mimeType?.startsWith(mimePrefix));
+      if (preferredScore) return preferredScore;
+    }
     const webmScore = Number(!a.mimeType?.startsWith('audio/webm'))
       - Number(!b.mimeType?.startsWith('audio/webm'));
     if (webmScore) return webmScore;
     if (a.mimeType?.startsWith('audio/mp4') && b.mimeType?.startsWith('audio/mp4')) {
-      return (a.averageBitrate ?? a.bitrate ?? 0) - (b.averageBitrate ?? b.bitrate ?? 0);
+      return (b.averageBitrate ?? b.bitrate ?? 0) - (a.averageBitrate ?? a.bitrate ?? 0);
     }
     return (b.averageBitrate ?? b.bitrate ?? 0) - (a.averageBitrate ?? a.bitrate ?? 0);
   })[0];
@@ -162,8 +168,10 @@ export function selectBestVideo(playerResponse) {
   })[0];
 }
 
-function selectBestMedia(playerResponse, mediaType) {
-  return mediaType === 'video' ? selectBestVideo(playerResponse) : selectBestAudio(playerResponse);
+function selectBestMedia(playerResponse, mediaType, preferredAudioContainer = 'auto') {
+  return mediaType === 'video'
+    ? selectBestVideo(playerResponse)
+    : selectBestAudio(playerResponse, preferredAudioContainer);
 }
 
 function playerIdFrom(value) {
@@ -322,6 +330,7 @@ function googleVideoHeaders(range) {
 export async function resolveAndFetchMedia({
   videoId,
   mediaType = 'audio',
+  audioContainer = 'auto',
   renderDecipherUrl,
   decipherToken,
   range,
@@ -338,14 +347,14 @@ export async function resolveAndFetchMedia({
     let playerResponse = await fetchInnerTubeResponse(videoId, diagnostics, integrity, mediaType);
     if (!playerResponse) {
       playerResponse = watch.playerResponse;
-      try { selectBestMedia(playerResponse, mediaType); } catch { playerResponse = null; }
+      try { selectBestMedia(playerResponse, mediaType, audioContainer); } catch { playerResponse = null; }
     }
     if (!playerResponse) {
       const status = diagnostics.watch?.playability || diagnostics.innerTube?.at(-1)?.playability || 'UNPLAYABLE';
       throw new ResolverError(status, 'この実行地域では再生可能な応答を取得できませんでした。', diagnostics);
     }
 
-    const format = selectBestMedia(playerResponse, mediaType);
+    const format = selectBestMedia(playerResponse, mediaType, audioContainer);
     const playerId = playerIdFrom(playerResponse?.assets?.js) || watch.playerId || await fetchFallbackPlayerId();
     diagnostics.format = {
       itag: format.itag ?? null,
@@ -353,6 +362,7 @@ export async function resolveAndFetchMedia({
       bitrate: format.averageBitrate ?? format.bitrate ?? null,
       width: format.width ?? null,
       height: format.height ?? null,
+      requestedContainer: mediaType === 'audio' ? audioContainer : null,
     };
 
     let deciphered = {};
@@ -445,11 +455,37 @@ export async function resolveAndFetchMedia({
     headers: googleVideoHeaders(requestedBytes ? null : range),
     redirect: 'follow',
   });
+  const streamAttempts = [{
+    mode: requestedBytes ? 'query-range' : 'http-range',
+    status: streamResponse.status,
+    contentLength: streamResponse.headers.get('content-length'),
+    contentRange: streamResponse.headers.get('content-range'),
+  }];
+  // 配信URLによってはqueryのrangeが403になる一方、標準のHTTP Rangeは通る。
+  // 失敗時だけ、元URLからrangeクエリを除いてHTTP Rangeで取り直す。
+  if (!streamResponse.ok && requestedBytes) {
+    await streamResponse.body?.cancel();
+    const headerRangeUrl = new URL(resolution.streamUrl);
+    headerRangeUrl.searchParams.delete('range');
+    headerRangeUrl.searchParams.set('pot', resolution.poToken);
+    headerRangeUrl.searchParams.append('cpn', resolution.cpn);
+    streamResponse = await fetch(headerRangeUrl, {
+      headers: googleVideoHeaders(range),
+      redirect: 'follow',
+    });
+    streamAttempts.push({
+      mode: 'http-range-fallback',
+      status: streamResponse.status,
+      contentLength: streamResponse.headers.get('content-length'),
+      contentRange: streamResponse.headers.get('content-range'),
+    });
+  }
   diagnostics.googlevideo = {
     status: streamResponse.status,
     contentType: streamResponse.headers.get('content-type'),
     contentLength: streamResponse.headers.get('content-length'),
     contentRange: streamResponse.headers.get('content-range'),
+    attempts: streamAttempts,
   };
   diagnostics.elapsedMs = Date.now() - startedAt;
   if (!streamResponse.ok || !streamResponse.body) {

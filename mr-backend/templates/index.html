@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <meta name="theme-color" content="#f6f7ff">
+    <meta name="api-base-url" content="">
+    <title>MR除去 — K-POP ボイスチェック</title>
+    <link rel="icon" href="/static/icons/favicon.ico?v=voice-icon-20260918" sizes="any">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/favicon-32.png?v=voice-icon-20260918">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/apple-touch-icon.png?v=voice-icon-20260918">
+    <link rel="manifest" href="/static/site.webmanifest?v=voice-icon-20260918">
+    <link rel="stylesheet" href="/static/style.css?v=split-ui-20260918">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="app-header">
+        <details class="help-menu">
+          <summary aria-label="設定と使い方を見る">?</summary>
+          <div class="help-menu__body">
+            <strong class="help-menu__title">設定</strong>
+            <div class="help-setting help-setting--range">
+              <div class="help-setting__heading"><label for="postBlurStrength"><b>投稿動画のぼかし</b></label><output id="postBlurValue" for="postBlurStrength">なし</output></div>
+              <input id="postBlurStrength" type="range" min="0" max="12" step="1" value="0" aria-label="投稿動画のぼかし強度">
+              <div class="help-setting__scale" aria-hidden="true"><span>なし</span><span>強い</span></div>
+              <small>投稿モードのプレビューだけに適用</small>
+            </div>
+            <div class="help-menu__divider" aria-hidden="true"></div>
+            <strong>使い方</strong>
+            <p>同じ曲のステージ動画とMVを入れるだけ。2つの差分から生歌を聴きやすくします。</p>
+          </div>
+        </details>
+        <div class="hero-copy">
+          <p class="product-name">MR除去</p>
+          <h1><span>推しの生歌、</span><span>聴いてみる？</span></h1>
+          <p><span>ステージ映像とMVの</span><span>差分をチェック。</span></p>
+        </div>
+        <figure class="hero-visual">
+          <img class="hero-illustration" src="/static/illustrations/kpop-voice-check-cutout.png" alt="ヘッドホンでステージ映像とMVを聴き比べるファンのイラスト">
+          <span class="hero-decoration hero-decoration--note" aria-hidden="true">♪</span>
+          <span class="hero-decoration hero-decoration--spark" aria-hidden="true">✦</span>
+        </figure>
+      </header>
+
+      <section class="workspace workspace--url" aria-labelledby="source-heading">
+        <div class="section-heading"><div><p class="eyebrow">STEP 1</p><h2 id="source-heading">動画を2つ入れる</h2></div></div>
+        <form id="downloadForm" novalidate>
+          <div class="url-primary-field">
+            <label for="videoUrlInput"><svg class="label-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2.5"></rect><path d="m10 9 5 3-5 3z"></path></svg>ステージ動画</label>
+            <div class="input-shell">
+              <svg class="input-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.6 13.4a4.5 4.5 0 0 0 6.4 0l2.1-2.1a4.5 4.5 0 0 0-6.4-6.4l-1.2 1.2"></path><path d="M13.4 10.6a4.5 4.5 0 0 0-6.4 0l-2.1 2.1a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2"></path></svg>
+              <input id="videoUrlInput" type="url" autocomplete="url" placeholder="YouTubeのURLを貼り付け" inputmode="url" aria-describedby="urlHelp">
+              <button class="paste-button" type="button" data-paste-target="videoUrlInput">ペースト</button>
+            </div>
+            <div id="videoUrlPreview" class="url-preview" hidden aria-live="polite">
+              <div class="url-preview__thumbnail"><img id="videoUrlPreviewImage" alt=""></div>
+              <div class="url-preview__copy"><span>ステージ動画</span></div>
+            </div>
+            <p id="urlHelp">音楽番組・ライブ・ダンス練習など</p>
+          </div>
+          <div class="instrumental-option">
+            <label for="karaUrlInput"><svg class="label-icon label-icon--music" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18V6l10-2v12"></path><circle cx="6" cy="18" r="3"></circle><circle cx="16" cy="16" r="3"></circle></svg>MV・公式音源 <em>必須</em></label>
+            <div class="input-shell">
+              <svg class="input-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.6 13.4a4.5 4.5 0 0 0 6.4 0l2.1-2.1a4.5 4.5 0 0 0-6.4-6.4l-1.2 1.2"></path><path d="M13.4 10.6a4.5 4.5 0 0 0-6.4 0l-2.1 2.1a4.5 4.5 0 0 0 6.4 6.4l1.2-1.2"></path></svg>
+              <input id="karaUrlInput" type="url" autocomplete="url" placeholder="YouTubeのURLを貼り付け" inputmode="url" aria-describedby="instrumentalHelp">
+              <button class="paste-button" type="button" data-paste-target="karaUrlInput">ペースト</button>
+            </div>
+            <div id="karaUrlPreview" class="url-preview" hidden aria-live="polite">
+              <div class="url-preview__thumbnail"><img id="karaUrlPreviewImage" alt=""></div>
+              <div class="url-preview__copy"><span>MV・公式音源</span></div>
+            </div>
+            <p id="instrumentalHelp">同じ曲の、生歌じゃない動画</p>
+          </div>
+          <div class="form-footer"><button id="downloadSubmit" class="button button--primary" type="submit"><span>生歌の差分を抽出</span></button></div>
+        </form>
+      </section>
+
+      <p id="status" class="status" data-state="idle" role="status" aria-live="polite">2つ入れたら、スタート。</p>
+      <section id="progressPanel" class="progress-panel hidden" aria-label="処理の進捗" aria-live="polite">
+        <div class="progress-panel__header">
+          <div><span class="progress-panel__pulse" aria-hidden="true"></span><strong id="progressLabel">処理を準備しています</strong></div>
+          <output id="progressValue">0%</output>
+        </div>
+        <div id="progressTrack" class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <span id="progressBar" class="progress-bar"></span>
+        </div>
+      </section>
+
+      <details class="file-source">
+        <summary>保存済みのファイルを使う</summary>
+        <div class="file-source__body">
+          <form id="uploadForm" novalidate>
+            <div class="source-list">
+              <div class="source-row"><div class="source-number" aria-hidden="true">1</div><div class="source-copy"><label for="videoInput">ステージ動画</label><p>歌声入り</p></div><label class="file-control" for="videoInput"><span class="file-control__label">選ぶ</span><span class="file-control__name" id="videoFileName">未選択</span><input id="videoInput" name="video" type="file" accept="video/*,audio/*" required></label></div>
+              <div class="source-row"><div class="source-number" aria-hidden="true">2</div><div class="source-copy"><label for="karaInput">MV・公式音源 <em>必須</em></label><p>生歌じゃない同じ曲</p></div><label class="file-control" for="karaInput"><span class="file-control__label">選ぶ</span><span class="file-control__name" id="karaFileName">未選択</span><input id="karaInput" name="karaoke" type="file" accept="audio/*,video/*" required></label></div>
+            </div>
+            <div class="form-footer"><button id="extractSubmit" class="button button--secondary" type="submit">ファイルから抽出</button></div>
+          </form>
+        </div>
+      </details>
+
+      <section id="playerArea" class="result hidden" aria-labelledby="result-heading">
+        <div class="section-heading result-heading"><div><p class="eyebrow">RESULT</p><h2 id="result-heading">生歌の差分</h2></div><p id="resultNote" class="section-note">再生でチェック。</p></div>
+        <div class="playback-switch" role="group" aria-label="再生方法">
+          <button id="videoModeBtn" class="playback-switch__button is-active" type="button" aria-pressed="true">動画</button>
+          <button id="audioModeBtn" class="playback-switch__button" type="button" aria-pressed="false">音声のみ</button>
+        </div>
+        <div class="preview-layout">
+          <div class="media-preview">
+            <div id="videoPreviewPanel" class="result-media-panel">
+              <video id="video" controls playsinline webkit-playsinline preload="metadata"></video>
+              <a id="videoDownloadBtn" class="result-download hidden" href="#" download="mr-removal-video.mp4">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 18v2h14v-2"></path></svg>
+                動画をダウンロード
+              </a>
+            </div>
+            <div id="audioPreviewPanel" class="audio-preview hidden">
+              <div class="audio-preview__mark" aria-hidden="true">♪</div>
+              <p>MIXでステージ音源と生歌を聴き比べ</p>
+              <audio id="vocalAudio" controls preload="metadata"></audio>
+              <audio id="originalAudio" preload="metadata"></audio>
+              <a id="audioDownloadBtn" class="result-download hidden" href="#" download="mr-removal-vocal.wav">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11m0 0 4-4m-4 4-4-4M5 18v2h14v-2"></path></svg>
+                音声をダウンロード
+              </a>
+            </div>
+          </div>
+          <div class="adjustments">
+            <div class="adjustment adjustment--enhance">
+              <div class="enhance-toggle__copy"><strong>ボーカル強調</strong><p>声を前に出して聞きやすく</p></div>
+              <label class="switch" for="vocalEnhanceToggle"><input id="vocalEnhanceToggle" type="checkbox" checked><span aria-hidden="true"></span><span class="sr-only">ボーカル強調を切り替える</span></label>
+            </div>
+            <div class="adjustment adjustment--reextract"><div class="adjustment__heading"><span>除去強度</span><output id="scaleVal">1.00</output></div><p>BGMが残るときだけ、もう少し。</p><button id="reextractBtn" class="button button--secondary" type="button">一段階強くする</button></div>
+          </div>
+        </div>
+        <section class="difference-lab" aria-labelledby="difference-heading">
+          <div><p class="eyebrow">MIX</p><h3 id="difference-heading">差分を試す</h3><p>ステージ映像を少し戻して、聴き比べ。</p></div>
+          <div class="difference-lab__control"><div class="adjustment__heading"><label for="mixSlider">MIX</label><output id="mixVal" for="mixSlider">1.00</output></div><input id="mixSlider" type="range" min="0" max="1" step="0.01" value="1"><div class="range-labels" aria-hidden="true"><span>STAGE</span><span>VOICE</span></div></div>
+        </section>
+        <div class="post-mode-entry">
+          <div><strong>投稿モード</strong><span>縦画面で再生しながらMIXを操作</span></div>
+          <button id="postModeBtn" class="button button--post" type="button">投稿モードを開く</button>
+        </div>
+      </section>
+
+      <footer class="site-footer" aria-label="サイト情報">
+        <nav class="site-footer__links" aria-label="規約とポリシー">
+          <button type="button" data-policy-open="termsDialog">利用規約</button>
+          <button type="button" data-policy-open="privacyDialog">プライバシーポリシー</button>
+          <button type="button" data-policy-open="copyrightDialog">著作権・免責事項</button>
+          <button type="button" data-policy-open="aboutDialog">このサイトについて</button>
+        </nav>
+      </footer>
+    </main>
+
+    <dialog id="termsDialog" class="policy-dialog" aria-labelledby="termsTitle">
+      <article class="policy-dialog__surface">
+        <header class="policy-dialog__header">
+          <div><span>TERMS</span><h2 id="termsTitle">利用規約</h2></div>
+          <button class="policy-dialog__close" type="button" data-policy-close aria-label="利用規約を閉じる">×</button>
+        </header>
+        <div class="policy-dialog__content">
+          <p class="policy-dialog__date">最終更新日：2026年9月18日</p>
+          <p>本利用規約は、「MR除去」（以下「本サービス」）の利用条件を定めるものです。本サービスを利用した時点で、本規約に同意したものとみなします。</p>
+          <section><h3>1. サービスの内容</h3><p>本サービスは、利用者が指定したステージ映像とMV・公式音源等を比較し、音声差分の確認を補助する実験的な音声処理ツールです。処理結果の正確性、完全性または特定目的への適合性を保証するものではありません。</p></section>
+          <section><h3>2. 利用できるコンテンツ</h3><p>利用者は、自ら権利を有するコンテンツ、権利者から許可を得たコンテンツ、または法令上利用が認められるコンテンツのみを本サービスに入力してください。入力・処理・保存・公開に必要な権利の確認は利用者の責任で行うものとします。</p></section>
+          <section><h3>3. 禁止事項</h3><ul><li>著作権、肖像権、プライバシーその他第三者の権利を侵害する行為</li><li>アクセス制御の回避、違法な複製・再配布または第三者コンテンツの無断公開</li><li>本サービスまたは外部サービスに過度な負荷をかける連続実行、自動実行その他の妨害行為</li><li>不正アクセス、解析結果の悪用、法令または公序良俗に反する行為</li></ul></section>
+          <section><h3>4. 外部サービス</h3><p>本サービスはYouTube、Google、CloudflareおよびRender等の外部サービスを利用します。各サービスの仕様変更、利用制限、障害等により、本サービスの全部または一部が利用できなくなる場合があります。</p></section>
+          <section><h3>5. サービスの変更・停止</h3><p>保守、障害、外部サービスの変更その他運営上必要な場合、事前の通知なく機能を変更または停止することがあります。</p></section>
+          <section><h3>6. 免責</h3><p>本サービスの利用または利用不能によって生じた損害について、運営者に故意または重大な過失がある場合を除き、運営者は法令で認められる範囲で責任を負いません。</p></section>
+          <section><h3>7. 規約の変更</h3><p>必要に応じて本規約を変更することがあります。重要な変更は本サービス上で案内し、変更後の規約は掲載時から適用されます。</p></section>
+          <section><h3>8. 準拠法</h3><p>本規約は日本法に準拠します。</p></section>
+        </div>
+      </article>
+    </dialog>
+
+    <dialog id="privacyDialog" class="policy-dialog" aria-labelledby="privacyTitle">
+      <article class="policy-dialog__surface">
+        <header class="policy-dialog__header">
+          <div><span>PRIVACY</span><h2 id="privacyTitle">プライバシーポリシー</h2></div>
+          <button class="policy-dialog__close" type="button" data-policy-close aria-label="プライバシーポリシーを閉じる">×</button>
+        </header>
+        <div class="policy-dialog__content">
+          <p class="policy-dialog__date">最終更新日：2026年9月18日</p>
+          <p>本サービスは、サービス提供に必要な範囲で利用者に関する情報を取り扱います。</p>
+          <section><h3>1. 取得・処理する情報</h3><ul><li>利用者が入力した動画URLおよびアップロードした動画・音声</li><li>本サービスが生成した音声、動画および処理途中の一時ファイル</li><li>IPアドレス、ブラウザ・端末情報、アクセス日時、エラー情報等のサーバーログ</li><li>ぼかし強度など、ブラウザのlocalStorageに保存される表示設定</li></ul></section>
+          <section><h3>2. 利用目的</h3><ul><li>動画・音声の取得、変換、差分抽出および結果提供</li><li>障害対応、不正利用防止、セキュリティ確保</li><li>利用状況の把握および機能・品質の改善</li><li>法令または利用規約に違反する行為への対応</li></ul></section>
+          <section><h3>3. ファイルの保存</h3><p>入力ファイル、取得メディアおよび生成結果は、処理と結果提供のためサーバー上に一時保存されます。これらは原則として作成から約30分で自動削除され、サーバー再起動時にも期限切れファイルを削除します。障害等により削除時刻が前後する場合があります。機密情報や個人情報を含むファイルは入力しないでください。</p></section>
+          <section><h3>4. 外部サービスへの送信</h3><p>処理のため、動画URL、技術情報またはメディアデータがYouTube・Google、Cloudflare、Render等へ送信される場合があります。これらの事業者による情報の取扱いには、各事業者のプライバシーポリシーが適用されます。</p></section>
+          <section><h3>5. Cookieとブラウザ保存</h3><p>本サービスは現在、広告配信を目的とするCookieを使用していません。投稿モードのぼかし強度など、一部の表示設定は利用者のブラウザにあるlocalStorageへ保存されます。将来、解析サービス等を導入して取扱いが変わる場合は、導入前に本ポリシーを更新します。</p></section>
+          <section><h3>6. 第三者提供</h3><p>法令に基づく場合、生命・身体・財産の保護に必要な場合、またはサービス提供に必要な委託先への提供を除き、本人の同意なく個人情報を第三者へ提供しません。</p></section>
+          <section><h3>7. 安全管理</h3><p>取り扱う情報への不正アクセス、漏えい、改ざん等を防ぐため、合理的な安全管理措置を講じます。ただし、インターネット上の通信および保存の完全な安全性を保証するものではありません。</p></section>
+          <section><h3>8. ポリシーの変更</h3><p>法令、サービス内容または利用する外部サービスの変更に応じ、本ポリシーを改定することがあります。重要な変更は本サービス上で案内します。</p></section>
+        </div>
+      </article>
+    </dialog>
+
+    <dialog id="copyrightDialog" class="policy-dialog" aria-labelledby="copyrightTitle">
+      <article class="policy-dialog__surface">
+        <header class="policy-dialog__header">
+          <div><span>RIGHTS &amp; NOTICE</span><h2 id="copyrightTitle">著作権・免責事項</h2></div>
+          <button class="policy-dialog__close" type="button" data-policy-close aria-label="著作権・免責事項を閉じる">×</button>
+        </header>
+        <div class="policy-dialog__content">
+          <p class="policy-dialog__date">最終更新日：2026年9月18日</p>
+          <section><h3>著作権について</h3><p>動画、音源、画像、歌詞、出演者の肖像その他のコンテンツに関する権利は、それぞれの権利者に帰属します。本サービスは、それらの権利の取得または利用許諾を利用者に与えるものではありません。</p></section>
+          <section><h3>利用者の責任</h3><p>処理対象の入力、生成結果の保存およびSNS等への投稿が適法かどうかは、利用者自身で確認してください。私的利用の範囲を超える公開、配布、販売等には、権利者の許諾が必要となる場合があります。</p></section>
+          <section><h3>権利侵害への対応</h3><p>権利侵害が確認された場合、運営者は対象機能の停止、データの削除、利用制限その他必要な措置を行うことがあります。</p></section>
+          <section><h3>第三者との関係</h3><p>本サービスはYouTube、Googleその他の権利者・出演者・所属事務所等が提供、承認または推奨するサービスではありません。各社名・サービス名は各権利者の商標または登録商標です。</p></section>
+          <section><h3>免責事項</h3><p>掲載情報および処理結果の正確性・完全性を保証しません。本サービスの利用により利用者と第三者との間で生じた紛争については、利用者の責任と費用で解決するものとします。</p></section>
+        </div>
+      </article>
+    </dialog>
+
+    <dialog id="aboutDialog" class="policy-dialog" aria-labelledby="aboutTitle">
+      <article class="policy-dialog__surface">
+        <header class="policy-dialog__header">
+          <div><span>ABOUT</span><h2 id="aboutTitle">このサイトについて</h2></div>
+          <button class="policy-dialog__close" type="button" data-policy-close aria-label="サイト情報を閉じる">×</button>
+        </header>
+        <div class="policy-dialog__content">
+          <p class="policy-dialog__date">最終更新日：2026年9月18日</p>
+          <p>「MR除去」は、同じ曲のステージ映像とMV・公式音源を比較し、その差分からステージ上の歌声を確認しやすくする音声処理ツールです。</p>
+          <section><h3>このサイトの目的</h3><p>歌唱やステージ表現を楽しみながら聴き比べられる、分かりやすい体験を提供することを目的としています。音源を配布することや、権利者のコンテンツを代替することを目的としていません。</p></section>
+          <section><h3>処理結果について</h3><p>音源の構成、歓声、残響、編集方法等によって、歌声以外の音が残る、音質が変化する、正確に分離できない場合があります。結果は補助的なものとしてお楽しみください。</p></section>
+          <section><h3>運営方針</h3><p>利用者の権利と権利者の知的財産を尊重し、安全で分かりやすいサービス運営を目指します。</p></section>
+        </div>
+      </article>
+    </dialog>
+
+    <div id="postMode" class="post-mode hidden" role="dialog" aria-modal="true" aria-label="投稿モード">
+      <div class="post-mode__canvas">
+        <header class="post-mode__header">
+          <span class="post-mode__brand"><span class="post-mode__brand-mark" aria-hidden="true"><img src="/static/icons/icon-192.png?v=voice-icon-20260918" alt=""></span><span>MR除去</span></span>
+          <button id="postCloseBtn" class="post-mode__close" type="button" aria-label="投稿モードを閉じる">×</button>
+        </header>
+        <div class="post-mode__intro">
+          <div class="post-mode__intro-copy">
+            <span>VOICE SPOTLIGHT</span>
+            <strong>推しの生歌を、<br>もっと近くに。</strong>
+          </div>
+          <img src="/static/illustrations/kpop-voice-check-cutout.png" alt="" aria-hidden="true">
+          <i class="post-mode__spark post-mode__spark--one" aria-hidden="true">✦</i>
+          <i class="post-mode__spark post-mode__spark--two" aria-hidden="true">♪</i>
+        </div>
+        <div class="post-mode__stage">
+          <div id="postVideoMount" class="post-mode__video"></div>
+        </div>
+        <div class="post-mode__mix">
+          <div class="post-mode__mix-value"><span><i aria-hidden="true">●</i> LIVE MIX</span><output id="postMixValue" for="postMixSlider">VOICE 100%</output></div>
+          <input id="postMixSlider" type="range" min="0" max="1" step="0.01" value="1" aria-label="投稿モードのMIX">
+          <div class="post-mode__range-labels" aria-hidden="true"><span>STAGE</span><span>VOICE</span></div>
+        </div>
+        <footer class="post-mode__footer">
+          <a id="postAppLink" href="/" target="_blank" rel="noopener"><i aria-hidden="true">↗</i><span id="postAppUrl">このアプリを開く</span></a>
+        </footer>
+      </div>
+    </div>
+    <script src="/static/app.js?v=split-ui-20260918"></script>
+  </body>
+</html>

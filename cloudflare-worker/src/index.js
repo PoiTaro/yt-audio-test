@@ -34,17 +34,21 @@ export class RegionalResolver extends DurableObject {
     const url = new URL(request.url);
     const videoId = url.searchParams.get('videoId');
     const mediaType = url.searchParams.get('mediaType') === 'video' ? 'video' : 'audio';
+    const audioContainer = ['webm', 'mp4'].includes(url.searchParams.get('format'))
+      ? url.searchParams.get('format')
+      : 'auto';
     const region = request.headers.get('X-Resolver-Region') || 'unknown';
     if (!videoId) return json({ error: { code: 'MISSING_VIDEO_ID', message: 'videoId is required' }, region }, 400);
     if (!this.env.RENDER_DECIPHER_URL) {
       return json({ error: { code: 'MISSING_DECIPHER_URL', message: 'RENDER_DECIPHER_URL is not configured' }, region }, 503);
     }
     try {
-      const cacheKey = `${mediaType}:${videoId}`;
+      const cacheKey = `${mediaType}:${audioContainer}:${videoId}`;
       const cached = this.resolutionCache.get(cacheKey);
       const run = (cachedResolution) => resolveAndFetchMedia({
           videoId,
           mediaType,
+          audioContainer,
           renderDecipherUrl: this.env.RENDER_DECIPHER_URL,
           decipherToken: this.env.DECIPHER_TOKEN,
           range: request.headers.get('Range'),
@@ -105,6 +109,10 @@ export default {
     if (requestedRegion && !VALID_REGIONS.has(requestedRegion)) {
       return json({ error: 'Invalid resolver region' }, 400);
     }
+    const requestedFormat = url.searchParams.get('format');
+    if (requestedFormat && !['webm', 'mp4'].includes(requestedFormat)) {
+      return json({ error: 'Invalid audio format' }, 400);
+    }
     const regions = requestedRegion ? [requestedRegion] : configuredRegions(env);
     if (!regions.length) return json({ error: 'No valid resolver regions are configured' }, 503);
 
@@ -115,6 +123,9 @@ export default {
       const regionalUrl = new URL('https://regional-resolver.internal/resolve');
       regionalUrl.searchParams.set('videoId', videoId);
       regionalUrl.searchParams.set('mediaType', url.pathname === '/video' ? 'video' : 'audio');
+      if (requestedFormat && url.pathname === '/audio') {
+        regionalUrl.searchParams.set('format', requestedFormat);
+      }
       try {
         const response = await stub.fetch(regionalUrl, {
           headers: {
