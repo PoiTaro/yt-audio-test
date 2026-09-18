@@ -241,24 +241,49 @@ export async function resolveAndFetchAudio({
       bitrate: format.averageBitrate ?? format.bitrate ?? null,
     };
 
-    const decipherResponse = await fetch(renderDecipherUrl, {
+    let deciphered = {};
+    let directStreamUrl = null;
+    try { directStreamUrl = format.url ? new URL(format.url) : null; } catch { /* Use the decipher service below. */ }
+    if (directStreamUrl && !directStreamUrl.searchParams.get('n')
+        && !format.signatureCipher && !format.cipher) {
+      deciphered = { url: format.url, nChanged: false };
+      diagnostics.decipher = { status: 200, nChanged: false, bypassed: true };
+    } else {
+      const decipherResponse = await fetch(renderDecipherUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(decipherToken ? { Authorization: `Bearer ${decipherToken}` } : {}),
+        },
+        body: JSON.stringify({
+          ...(playerId ? { playerId } : {}),
+          ...(format.url ? { url: format.url } : {}),
+          ...(format.signatureCipher ? { signatureCipher: format.signatureCipher } : {}),
+          ...(format.cipher ? { cipher: format.cipher } : {}),
+        }),
+      });
+      try { deciphered = await decipherResponse.json(); } catch { /* Normalize below. */ }
+      diagnostics.decipher = { status: decipherResponse.status, nChanged: deciphered.nChanged ?? null };
+      if (!decipherResponse.ok || !deciphered.url) {
+        throw new ResolverError('DECIPHER_FAILED', deciphered.error || `変換APIがHTTP ${decipherResponse.status}を返しました。`, diagnostics);
+      }
+    }
+    const poTokenUrl = new URL(renderDecipherUrl);
+    poTokenUrl.pathname = '/api/pot';
+    poTokenUrl.search = '';
+    const poTokenResponse = await fetch(poTokenUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...(decipherToken ? { Authorization: `Bearer ${decipherToken}` } : {}),
       },
-      body: JSON.stringify({
-        ...(playerId ? { playerId } : {}),
-        ...(format.url ? { url: format.url } : {}),
-        ...(format.signatureCipher ? { signatureCipher: format.signatureCipher } : {}),
-        ...(format.cipher ? { cipher: format.cipher } : {}),
-      }),
+      body: JSON.stringify({ videoId }),
     });
-    let deciphered = {};
-    try { deciphered = await decipherResponse.json(); } catch { /* Normalize below. */ }
-    diagnostics.decipher = { status: decipherResponse.status, nChanged: deciphered.nChanged ?? null };
-    if (!decipherResponse.ok || !deciphered.url) {
-      throw new ResolverError('DECIPHER_FAILED', deciphered.error || `変換APIがHTTP ${decipherResponse.status}を返しました。`, diagnostics);
+    let poTokenResult = {};
+    try { poTokenResult = await poTokenResponse.json(); } catch { /* Normalize below. */ }
+    diagnostics.poToken = { status: poTokenResponse.status, success: Boolean(poTokenResult.poToken) };
+    if (!poTokenResponse.ok || !poTokenResult.poToken) {
+      throw new ResolverError('PO_TOKEN_FAILED', poTokenResult.error || `PO Token APIがHTTP ${poTokenResponse.status}を返しました。`, diagnostics);
     }
     const resolvedStreamUrl = new URL(deciphered.url);
     const totalBytes = Number(format.contentLength || resolvedStreamUrl.searchParams.get('clen'));
@@ -270,6 +295,7 @@ export async function resolveAndFetchAudio({
       format: diagnostics.format,
       totalBytes,
       cpn: crypto.randomUUID().replaceAll('-', '').slice(0, 16),
+      poToken: poTokenResult.poToken,
     };
   } else {
     diagnostics.cacheHit = true;
@@ -284,10 +310,21 @@ export async function resolveAndFetchAudio({
   // HTTP Rangeだけを変更してもクエリ側が優先され、1 MiB以降が403になるため、
   // 呼び出し元が要求した区間へ両方を揃える。
   const requestedBytes = String(range ?? '').match(/^bytes=(\d+)-(\d+)$/i);
+  streamUrl.searchParams.set('pot', resolution.poToken);
   if (requestedBytes) {
-    streamUrl.searchParams.set('cpn', resolution.cpn);
-    streamUrl.searchParams.set('range', `${requestedBytes[1]}-${requestedBytes[2]}`);
+    // 既存値は署名対象になり得るため置換しない。YouTube.jsと同様に末尾へ追加し、
+    // GoogleVideoに最後のrangeを実際の取得区間として解釈させる。
+    streamUrl.searchParams.append('cpn', resolution.cpn);
+    streamUrl.searchParams.append('range', `${requestedBytes[1]}-${requestedBytes[2]}`);
   }
+  diagnostics.streamRequest = {
+    client: streamUrl.searchParams.get('c'),
+    originalRanges: new URL(resolution.streamUrl).searchParams.getAll('range'),
+    effectiveRanges: streamUrl.searchParams.getAll('range'),
+    cpnCount: streamUrl.searchParams.getAll('cpn').length,
+    rn: streamUrl.searchParams.get('rn'),
+    rbuf: streamUrl.searchParams.get('rbuf'),
+  };
   let streamResponse = await fetch(streamUrl, {
     // YouTube.jsも分割取得ではHTTP Rangeを送らず、URLのrangeだけを使う。
     headers: googleVideoHeaders(requestedBytes ? null : range),

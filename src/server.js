@@ -26,6 +26,7 @@ const sessionTokenUrl = process.env.SESSION_TOKEN_URL || '';
 const runStartupValidation = process.env.RUN_STARTUP_VALIDATION === 'true';
 const decipherToken = process.env.DECIPHER_TOKEN || '';
 const playerCache = new Map();
+let poMinterPromise = null;
 
 const state = {
   status: 'starting',
@@ -232,11 +233,39 @@ async function handleDecipher(request, response) {
   });
 }
 
+async function handlePoToken(request, response) {
+  if (decipherToken && request.headers.authorization !== `Bearer ${decipherToken}`) {
+    return jsonResponse(response, 401, { error: 'Unauthorized' });
+  }
+  const body = await readJsonBody(request);
+  const videoId = String(body.videoId ?? '');
+  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) {
+    return jsonResponse(response, 400, { error: 'Invalid videoId' });
+  }
+  try {
+    if (!poMinterPromise) {
+      poMinterPromise = createWebPoMinter().catch((error) => {
+        poMinterPromise = null;
+        throw error;
+      });
+    }
+    const poMinter = await poMinterPromise;
+    const poToken = await poMinter.mintAsWebsafeString(videoId);
+    return jsonResponse(response, 200, { poToken });
+  } catch (error) {
+    poMinterPromise = null;
+    throw error;
+  }
+}
+
 const server = http.createServer(async (request, response) => {
   try {
     const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
     if (request.method === 'POST' && url.pathname === '/api/decipher') {
       return await handleDecipher(request, response);
+    }
+    if (request.method === 'POST' && url.pathname === '/api/pot') {
+      return await handlePoToken(request, response);
     }
     if (request.method !== 'GET') return jsonResponse(response, 405, { error: 'Method not allowed' });
     if (url.pathname === '/health') {
