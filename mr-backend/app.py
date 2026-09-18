@@ -12,6 +12,7 @@ import uuid
 import math
 import gc
 import ctypes
+import ipaddress
 from collections import defaultdict, deque
 from pathlib import Path
 from urllib import error as urlerror
@@ -138,7 +139,19 @@ RATE_LIMITS_LOCK = threading.Lock()
 def _add_frontend_cors_headers(response):
     """許可した静的UIからだけAPIと一時メディアを読めるようにする。"""
     origin = (request.headers.get("Origin") or "").rstrip("/")
-    if origin in FRONTEND_ORIGINS:
+    allowed = origin in FRONTEND_ORIGINS
+    if origin and not allowed:
+        parsed = urlparse.urlparse(origin)
+        hostname = (parsed.hostname or "").lower()
+        if parsed.scheme == "http" and hostname == "localhost":
+            allowed = True
+        elif parsed.scheme == "http":
+            try:
+                address = ipaddress.ip_address(hostname)
+                allowed = address.is_private or address.is_loopback
+            except ValueError:
+                pass
+    if allowed:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
