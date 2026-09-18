@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   extractInitialPlayerResponse,
   extractVideoId,
+  parseContentRange,
   selectBestAudio,
 } from '../cloudflare-worker/src/resolver.js';
 
@@ -34,4 +35,15 @@ test('selectBestAudio prefers non-DRC and then highest bitrate', () => {
     { itag: 4, mimeType: 'audio/webm', cipher: 'url=x', bitrate: 150_000 },
   ] } });
   assert.equal(selected.itag, 4);
+});
+
+test('parseContentRange validates bounded byte ranges', () => {
+  assert.deepEqual(parseContentRange('bytes 0-1048575/15000000'), {
+    start: 0,
+    end: 1_048_575,
+    total: 15_000_000,
+  });
+  assert.equal(parseContentRange('bytes */15000000'), null);
+  assert.equal(parseContentRange('bytes 10-9/100'), null);
+  assert.equal(parseContentRange('bytes 0-100/100'), null);
 });

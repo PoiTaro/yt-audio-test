@@ -27,6 +27,7 @@ export class RegionalResolver extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
     this.env = env;
+    this.resolutionCache = new Map();
   }
 
   async fetch(request) {
@@ -38,12 +39,27 @@ export class RegionalResolver extends DurableObject {
       return json({ error: { code: 'MISSING_DECIPHER_URL', message: 'RENDER_DECIPHER_URL is not configured' }, region }, 503);
     }
     try {
-      const result = await resolveAndFetchAudio({
-        videoId,
-        renderDecipherUrl: this.env.RENDER_DECIPHER_URL,
-        decipherToken: this.env.DECIPHER_TOKEN,
-        range: request.headers.get('Range'),
-      });
+      const cached = this.resolutionCache.get(videoId);
+      const run = (cachedResolution) => resolveAndFetchAudio({
+          videoId,
+          renderDecipherUrl: this.env.RENDER_DECIPHER_URL,
+          decipherToken: this.env.DECIPHER_TOKEN,
+          range: request.headers.get('Range'),
+          cachedResolution,
+        });
+      let result;
+      try {
+        result = await run(cached?.expiresAt > Date.now() ? cached.resolution : null);
+      } catch (error) {
+        if (!cached) throw error;
+        this.resolutionCache.delete(videoId);
+        result = await run(null);
+      }
+      const expireSeconds = Number(new URL(result.resolution.streamUrl).searchParams.get('expire'));
+      const expiresAt = Number.isFinite(expireSeconds)
+        ? Math.min(expireSeconds * 1_000 - 60_000, Date.now() + 10 * 60_000)
+        : Date.now() + 5 * 60_000;
+      this.resolutionCache.set(videoId, { resolution: result.resolution, expiresAt });
       const headers = new Headers();
       for (const name of ['accept-ranges', 'content-length', 'content-range', 'etag', 'last-modified']) {
         const value = result.response.headers.get(name);
@@ -82,7 +98,11 @@ export default {
     } catch (error) {
       return json({ error: serializeResolverError(error) }, 400);
     }
-    const regions = configuredRegions(env);
+    const requestedRegion = url.searchParams.get('region');
+    if (requestedRegion && !VALID_REGIONS.has(requestedRegion)) {
+      return json({ error: 'Invalid resolver region' }, 400);
+    }
+    const regions = requestedRegion ? [requestedRegion] : configuredRegions(env);
     if (!regions.length) return json({ error: 'No valid resolver regions are configured' }, 503);
 
     const failures = [];

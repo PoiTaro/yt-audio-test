@@ -190,61 +190,107 @@ function safeContentType(value) {
   return value && /^audio\//i.test(value) ? value : 'application/octet-stream';
 }
 
-export async function resolveAndFetchAudio({ videoId, renderDecipherUrl, decipherToken, range }) {
+export function parseContentRange(value) {
+  const match = String(value ?? '').match(/^bytes (\d+)-(\d+)\/(\d+)$/i);
+  if (!match) return null;
+  const result = { start: Number(match[1]), end: Number(match[2]), total: Number(match[3]) };
+  if (!Number.isSafeInteger(result.start) || !Number.isSafeInteger(result.end)
+      || !Number.isSafeInteger(result.total) || result.start > result.end || result.end >= result.total) {
+    return null;
+  }
+  return result;
+}
+
+function googleVideoHeaders(range) {
+  return {
+    ...(range ? { Range: range } : {}),
+    Origin: 'https://www.youtube.com',
+    Referer: 'https://www.youtube.com/',
+    'User-Agent': MOBILE_USER_AGENT,
+  };
+}
+
+export async function resolveAndFetchAudio({
+  videoId,
+  renderDecipherUrl,
+  decipherToken,
+  range,
+  cachedResolution = null,
+}) {
   const startedAt = Date.now();
   const diagnostics = { videoId };
-  const watch = await fetchWatchResponse(videoId, diagnostics);
-  let playerResponse = watch.playerResponse;
-  try {
-    selectBestAudio(playerResponse);
-  } catch {
-    playerResponse = await fetchInnerTubeResponse(videoId, diagnostics);
-  }
-  if (!playerResponse) {
-    const status = diagnostics.watch?.playability || diagnostics.innerTube?.at(-1)?.playability || 'UNPLAYABLE';
-    throw new ResolverError(status, 'この実行地域では再生可能な応答を取得できませんでした。', diagnostics);
+  let resolution = cachedResolution;
+  if (!resolution) {
+    const watch = await fetchWatchResponse(videoId, diagnostics);
+    let playerResponse = watch.playerResponse;
+    try {
+      selectBestAudio(playerResponse);
+    } catch {
+      playerResponse = await fetchInnerTubeResponse(videoId, diagnostics);
+    }
+    if (!playerResponse) {
+      const status = diagnostics.watch?.playability || diagnostics.innerTube?.at(-1)?.playability || 'UNPLAYABLE';
+      throw new ResolverError(status, 'この実行地域では再生可能な応答を取得できませんでした。', diagnostics);
+    }
+
+    const format = selectBestAudio(playerResponse);
+    const playerId = playerIdFrom(playerResponse?.assets?.js) || watch.playerId || await fetchFallbackPlayerId();
+    diagnostics.format = {
+      itag: format.itag ?? null,
+      mimeType: format.mimeType ?? null,
+      bitrate: format.averageBitrate ?? format.bitrate ?? null,
+    };
+
+    const decipherResponse = await fetch(renderDecipherUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(decipherToken ? { Authorization: `Bearer ${decipherToken}` } : {}),
+      },
+      body: JSON.stringify({
+        ...(playerId ? { playerId } : {}),
+        ...(format.url ? { url: format.url } : {}),
+        ...(format.signatureCipher ? { signatureCipher: format.signatureCipher } : {}),
+        ...(format.cipher ? { cipher: format.cipher } : {}),
+      }),
+    });
+    let deciphered = {};
+    try { deciphered = await decipherResponse.json(); } catch { /* Normalize below. */ }
+    diagnostics.decipher = { status: decipherResponse.status, nChanged: deciphered.nChanged ?? null };
+    if (!decipherResponse.ok || !deciphered.url) {
+      throw new ResolverError('DECIPHER_FAILED', deciphered.error || `変換APIがHTTP ${decipherResponse.status}を返しました。`, diagnostics);
+    }
+    const resolvedStreamUrl = new URL(deciphered.url);
+    const totalBytes = Number(format.contentLength || resolvedStreamUrl.searchParams.get('clen'));
+    if (!Number.isSafeInteger(totalBytes) || totalBytes <= 0) {
+      throw new ResolverError('NO_CONTENT_LENGTH', '音声ストリームの全体サイズを取得できませんでした。', diagnostics);
+    }
+    resolution = {
+      streamUrl: deciphered.url,
+      format: diagnostics.format,
+      totalBytes,
+      cpn: crypto.randomUUID().replaceAll('-', '').slice(0, 16),
+    };
+  } else {
+    diagnostics.cacheHit = true;
+    diagnostics.format = resolution.format;
   }
 
-  const format = selectBestAudio(playerResponse);
-  const playerId = playerIdFrom(playerResponse?.assets?.js) || watch.playerId || await fetchFallbackPlayerId();
-  if (!playerId) throw new ResolverError('NO_PLAYER_ID', 'Player IDを取得できませんでした。', diagnostics);
-  diagnostics.format = {
-    itag: format.itag ?? null,
-    mimeType: format.mimeType ?? null,
-    bitrate: format.averageBitrate ?? format.bitrate ?? null,
-  };
-
-  const decipherResponse = await fetch(renderDecipherUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(decipherToken ? { Authorization: `Bearer ${decipherToken}` } : {}),
-    },
-    body: JSON.stringify({
-      playerId,
-      ...(format.url ? { url: format.url } : {}),
-      ...(format.signatureCipher ? { signatureCipher: format.signatureCipher } : {}),
-      ...(format.cipher ? { cipher: format.cipher } : {}),
-    }),
-  });
-  let deciphered = {};
-  try { deciphered = await decipherResponse.json(); } catch { /* Normalize below. */ }
-  diagnostics.decipher = { status: decipherResponse.status, nChanged: deciphered.nChanged ?? null };
-  if (!decipherResponse.ok || !deciphered.url) {
-    throw new ResolverError('DECIPHER_FAILED', deciphered.error || `変換APIがHTTP ${decipherResponse.status}を返しました。`, diagnostics);
-  }
-
-  const streamUrl = new URL(deciphered.url);
+  const streamUrl = new URL(resolution.streamUrl);
   if (streamUrl.protocol !== 'https:' || !/(^|\.)googlevideo\.com$/i.test(streamUrl.hostname)) {
     throw new ResolverError('INVALID_STREAM_HOST', '変換APIが不正な配信先を返しました。', diagnostics);
   }
-  const streamResponse = await fetch(streamUrl, {
-    headers: {
-      ...(range ? { Range: range } : {}),
-      Origin: 'https://www.youtube.com',
-      Referer: 'https://www.youtube.com/',
-      'User-Agent': MOBILE_USER_AGENT,
-    },
+  // Player応答のURLには先頭1 MiB用のrangeクエリが含まれる場合がある。
+  // HTTP Rangeだけを変更してもクエリ側が優先され、1 MiB以降が403になるため、
+  // 呼び出し元が要求した区間へ両方を揃える。
+  const requestedBytes = String(range ?? '').match(/^bytes=(\d+)-(\d+)$/i);
+  if (requestedBytes) {
+    streamUrl.searchParams.set('cpn', resolution.cpn);
+    streamUrl.searchParams.set('range', `${requestedBytes[1]}-${requestedBytes[2]}`);
+  }
+  let streamResponse = await fetch(streamUrl, {
+    // YouTube.jsも分割取得ではHTTP Rangeを送らず、URLのrangeだけを使う。
+    headers: googleVideoHeaders(requestedBytes ? null : range),
     redirect: 'follow',
   });
   diagnostics.googlevideo = {
@@ -257,10 +303,33 @@ export async function resolveAndFetchAudio({ videoId, renderDecipherUrl, deciphe
   if (!streamResponse.ok || !streamResponse.body) {
     throw new ResolverError(`GOOGLEVIDEO_${streamResponse.status}`, `GoogleVideoがHTTP ${streamResponse.status}を返しました。`, diagnostics);
   }
+  if (requestedBytes) {
+    const start = Number(requestedBytes[1]);
+    const requestedEnd = Number(requestedBytes[2]);
+    const end = Math.min(requestedEnd, resolution.totalBytes - 1);
+    const expectedBytes = end - start + 1;
+    const receivedBytes = Number(streamResponse.headers.get('content-length'));
+    if (start < 0 || start >= resolution.totalBytes || end < start
+        || (Number.isFinite(receivedBytes) && receivedBytes !== expectedBytes)) {
+      throw new ResolverError('INVALID_RANGE_RESPONSE', 'GoogleVideoのRange応答サイズが一致しません。', {
+        ...diagnostics,
+        requestedRange: range,
+        expectedBytes,
+        receivedBytes,
+        totalBytes: resolution.totalBytes,
+      });
+    }
+    const headers = new Headers(streamResponse.headers);
+    headers.set('content-range', `bytes ${start}-${end}/${resolution.totalBytes}`);
+    headers.set('content-length', String(expectedBytes));
+    headers.set('accept-ranges', 'bytes');
+    streamResponse = new Response(streamResponse.body, { status: 206, headers });
+  }
   return {
     response: streamResponse,
     diagnostics,
     contentType: safeContentType(streamResponse.headers.get('content-type')),
+    resolution,
   };
 }
 

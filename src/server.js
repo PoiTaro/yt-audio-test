@@ -186,7 +186,7 @@ async function handleDecipher(request, response) {
   }
   const body = await readJsonBody(request);
   const playerId = String(body.playerId ?? '');
-  if (!/^[A-Za-z0-9_-]{6,32}$/.test(playerId)) {
+  if (playerId && !/^[A-Za-z0-9_-]{6,32}$/.test(playerId)) {
     return jsonResponse(response, 400, { error: 'Invalid playerId' });
   }
 
@@ -214,18 +214,19 @@ async function handleDecipher(request, response) {
     return jsonResponse(response, 400, { error: 'Stream URL has no n parameter' });
   }
 
-  if (!playerCache.has(playerId)) {
-    playerCache.set(playerId, Player.create(undefined, fetch, undefined, playerId)
+  const playerCacheKey = playerId || 'auto';
+  if (!playerCache.has(playerCacheKey)) {
+    playerCache.set(playerCacheKey, Player.create(undefined, fetch, undefined, playerId || undefined)
       .catch((error) => {
-        playerCache.delete(playerId);
+        playerCache.delete(playerCacheKey);
         throw error;
       }));
   }
-  const player = await playerCache.get(playerId);
+  const player = await playerCache.get(playerCacheKey);
   const decipheredUrl = await player.decipher(directUrl, signatureCipher, cipher);
   const deciphered = new URL(decipheredUrl);
   return jsonResponse(response, 200, {
-    playerId,
+    playerId: player.player_id,
     nChanged: rawUrl.searchParams.get('n') !== deciphered.searchParams.get('n'),
     url: decipheredUrl,
   });
