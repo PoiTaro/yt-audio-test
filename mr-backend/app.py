@@ -676,6 +676,29 @@ def extract_vocals(
     time_map: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """区間別の時刻対応を反映したSTFTスペクトル減算でMR成分を抑える。"""
+    if LOW_MEMORY_MODE:
+        # 仮運用中のRender Freeでは、librosa/NumbaのJIT初期化だけで
+        # 512 MBを超えるため、位置合わせ済み波形を直接減算する。
+        # float32のまま処理し、中間スペクトル行列を作らない。
+        length = min(len(original), len(karaoke))
+        if length < 2_048:
+            raise ValueError("差分抽出に必要な音声が短すぎます。")
+        original_low_memory = np.asarray(original[:length], dtype=np.float32)
+        karaoke_low_memory = np.asarray(karaoke[:length], dtype=np.float32)
+        subtraction_scale = np.float32(scale_factor * 0.92)
+        natural_vocals = _normalise(
+            original_low_memory - karaoke_low_memory * subtraction_scale
+        ).astype(np.float32, copy=False)
+        # 軽いソフトクリップで小さい声を前に出し、ピークだけを抑える。
+        emphasis = np.float32(1.35)
+        enhanced_vocals = np.tanh(natural_vocals * emphasis).astype(
+            np.float32, copy=False
+        )
+        enhanced_vocals = _normalise(enhanced_vocals).astype(
+            np.float32, copy=False
+        )
+        return natural_vocals, enhanced_vocals
+
     n_fft, hop_length = 2_048, 512
     original_stft = librosa.stft(original, n_fft=n_fft, hop_length=hop_length)
     karaoke_stft = librosa.stft(karaoke, n_fft=n_fft, hop_length=hop_length)
