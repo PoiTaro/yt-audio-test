@@ -146,4 +146,14 @@ Wranglerの匿名一時アカウントへCoordinator WorkerとSQLite-backed Dura
 
 3/4地域でPlayer応答とaudio-only format取得に成功し、単純なWorker複製と違って配置地域ごとに結果が分かれました。これにより、Durable Objectの配置ヒントを使った地域分散が`LOGIN_REQUIRED`出口を避ける実用的な候補であることを確認できました。
 
-この試験時点の公開Renderは`POST /api/decipher`を含まない旧デプロイだったため、GoogleVideo取得までの最終確認は新版Renderの反映後に行います。地域側の失敗と変換サービス側の失敗は診断JSONで別々に記録されます。
+公開Renderは`POST /api/decipher`を含まない旧デプロイのままだったため、新版変換APIをローカルで起動し、検証中だけCloudflare Quick Tunnelで公開して最終経路を確認しました。地域側の失敗と変換サービス側の失敗は診断JSONで別々に記録されます。
+
+Coordinator経由で3回実行した結果は3/3成功でした。
+
+| 試行 | 採用地域 | GoogleVideo | Content-Type | 取得量 |
+|---:|---|---|---|---:|
+| 1 | `weur` | HTTP 206 | `audio/mp4` | 309,288 bytes |
+| 2 | `apac-se` | HTTP 206 | `audio/mp4` | 65,536 bytes |
+| 3 | `weur` | HTTP 206 | `audio/mp4` | 65,536 bytes |
+
+すべてitag 140を選択しました。試行ごとに`apac-se`と`weur`が切り替わっても完走しており、Coordinatorのフォールバックと地域内完結ストリーミングが実動することを確認できました。Quick Tunnelは検証後に停止し、本番依存には含めません。

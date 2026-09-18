@@ -131,6 +131,8 @@ npm run worker:dev
 
 ブラウザへ共有Secretを置かないため、公開時はPythonバックエンドからWorkerの`/audio`を呼びます。利用者側の操作は従来どおりYouTube URLの貼り付けだけです。詳しい設定は`cloudflare-worker/README.md`を参照してください。
 
+匿名一時配置での実測では、Coordinator経由の3試行すべてがHTTP 206の音声取得まで成功し、`apac-se`と`weur`が成功経路として使われました。
+
 ## ブラウザ側取得の実証
 
 `browser-probe/`は、Chromium拡張のService WorkerからGoogleVideoをRange取得できるかを確認する最小ハーネスです。別途[LuanRT/ytc-bridge](https://github.com/LuanRT/ytc-bridge)をビルドして未パック拡張として読み込み、次を実行します。
