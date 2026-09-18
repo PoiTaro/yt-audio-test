@@ -2,7 +2,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { Platform } from 'youtubei.js';
+import { Platform, Player } from 'youtubei.js';
 import { buildSummary, classifyError, createResolver, extractVideoId, probeClient, probeHttp, runFfmpeg } from './core.js';
 import { extractInitialPlayerResponse, selectHtmlAudioFormat } from './html.js';
 import { createWebPoMinter } from './pot.js';
@@ -23,6 +23,7 @@ const sessionMode = process.env.SESSION_MODE || 'dedicated';
 const generateSessionLocally = process.env.GENERATE_SESSION_LOCALLY === 'true';
 const poTokenMode = process.env.PO_TOKEN_MODE || 'none';
 const sessionTokenUrl = process.env.SESSION_TOKEN_URL || '';
+const playerCache = new Map();
 
 const state = {
   status: 'starting',
@@ -162,20 +163,81 @@ function htmlResponse(response) {
   response.end(body);
 }
 
-const server = http.createServer((request, response) => {
-  const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
-  if (request.method !== 'GET') return jsonResponse(response, 405, { error: 'Method not allowed' });
-  if (url.pathname === '/health') {
-    return jsonResponse(response, 200, {
-      status: state.status,
-      progress: state.progress,
-      startedAt: state.startedAt,
-      completedAt: state.completedAt,
-    });
+async function readJsonBody(request, maxBytes = 16_384) {
+  const chunks = [];
+  let bytes = 0;
+  for await (const chunk of request) {
+    bytes += chunk.length;
+    if (bytes > maxBytes) throw Object.assign(new Error('Request body too large'), { statusCode: 413 });
+    chunks.push(chunk);
   }
-  if (url.pathname === '/report') return jsonResponse(response, state.status === 'running' ? 202 : 200, state);
-  if (url.pathname === '/') return htmlResponse(response);
-  return jsonResponse(response, 404, { error: 'Not found' });
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    throw Object.assign(new Error('Invalid JSON body'), { statusCode: 400 });
+  }
+}
+
+async function handleDecipher(request, response) {
+  const body = await readJsonBody(request);
+  const playerId = String(body.playerId ?? '');
+  if (!/^[A-Za-z0-9_-]{6,32}$/.test(playerId)) {
+    return jsonResponse(response, 400, { error: 'Invalid playerId' });
+  }
+
+  let rawUrl;
+  try {
+    rawUrl = new URL(String(body.url ?? ''));
+  } catch {
+    return jsonResponse(response, 400, { error: 'Invalid stream URL' });
+  }
+  if (rawUrl.protocol !== 'https:' || !/(^|\.)googlevideo\.com$/i.test(rawUrl.hostname)) {
+    return jsonResponse(response, 400, { error: 'Only HTTPS googlevideo.com URLs are accepted' });
+  }
+  if (!rawUrl.searchParams.get('n')) {
+    return jsonResponse(response, 400, { error: 'Stream URL has no n parameter' });
+  }
+
+  if (!playerCache.has(playerId)) {
+    playerCache.set(playerId, Player.create(undefined, fetch, undefined, playerId)
+      .catch((error) => {
+        playerCache.delete(playerId);
+        throw error;
+      }));
+  }
+  const player = await playerCache.get(playerId);
+  const decipheredUrl = await player.decipher(rawUrl.toString());
+  const deciphered = new URL(decipheredUrl);
+  return jsonResponse(response, 200, {
+    playerId,
+    nChanged: rawUrl.searchParams.get('n') !== deciphered.searchParams.get('n'),
+    url: decipheredUrl,
+  });
+}
+
+const server = http.createServer(async (request, response) => {
+  try {
+    const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+    if (request.method === 'POST' && url.pathname === '/api/decipher') {
+      return await handleDecipher(request, response);
+    }
+    if (request.method !== 'GET') return jsonResponse(response, 405, { error: 'Method not allowed' });
+    if (url.pathname === '/health') {
+      return jsonResponse(response, 200, {
+        status: state.status,
+        progress: state.progress,
+        startedAt: state.startedAt,
+        completedAt: state.completedAt,
+      });
+    }
+    if (url.pathname === '/report') return jsonResponse(response, state.status === 'running' ? 202 : 200, state);
+    if (url.pathname === '/') return htmlResponse(response);
+    return jsonResponse(response, 404, { error: 'Not found' });
+  } catch (error) {
+    console.error(error?.stack || error);
+    if (!response.headersSent) jsonResponse(response, error?.statusCode || 500, { error: error?.message || 'Internal error' });
+    else response.destroy();
+  }
 });
 
 async function runValidation() {
