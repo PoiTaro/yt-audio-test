@@ -205,6 +205,7 @@ async function runValidation() {
       }
       if (!trustedSession) throw lastError || new Error('Trusted session generator timed out');
     }
+    state.htmlProbe = await runWatchPageProbe('jNQXAC9IVRw');
     let sharedYoutube = null;
     const dedicatedSessions = new Map();
     if (sessionMode === 'override') {
@@ -272,7 +273,6 @@ async function runValidation() {
       }
       state.results.push(entry);
     }
-    state.htmlProbe = await runWatchPageProbe('jNQXAC9IVRw');
     state.summary = buildSummary(state.results);
     state.status = 'complete';
     console.log(`Validation complete: ${state.summary.fullSuccess.successes}/${state.summary.fullSuccess.total}`);
