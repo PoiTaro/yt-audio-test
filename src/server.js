@@ -2,8 +2,12 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { buildSummary, classifyError, createResolver, extractVideoId, probeClient } from './core.js';
+import { Platform } from 'youtubei.js';
+import { buildSummary, classifyError, createResolver, extractVideoId, probeClient, probeHttp, runFfmpeg } from './core.js';
+import { extractInitialPlayerResponse, selectHtmlAudioFormat } from './html.js';
 import { createWebPoMinter } from './pot.js';
+
+Platform.shim.eval = async (data) => new Function(data.output)();
 
 const port = Number(process.env.PORT || 10000);
 const clients = (process.env.TEST_CLIENTS || 'ANDROID_VR,IOS,WEB,MWEB,ANDROID,TV,TV_SIMPLY,TV_EMBEDDED,WEB_EMBEDDED,VISIONOS,YTMUSIC,YTMUSIC_ANDROID,YTKIDS,WEB_CREATOR,YTSTUDIO_ANDROID')
@@ -47,9 +51,79 @@ const state = {
   },
   progress: { completedAttempts: 0, totalAttempts: inputs.length * clients.length },
   results: [],
+  htmlProbe: null,
   summary: null,
   error: null,
 };
+
+async function runWatchPageProbe(videoId) {
+  const result = {
+    videoId,
+    watchPageStatus: null,
+    watchPageBytes: 0,
+    playability: null,
+    formats: 0,
+    selectedFormat: null,
+    deciphered: false,
+    googlevideo: null,
+    ffmpeg: null,
+    success: false,
+    error: null,
+  };
+  try {
+    const response = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+      headers: {
+        'user-agent': 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36',
+        'accept-language': 'ja,en-US;q=0.9,en;q=0.8',
+      },
+      signal: AbortSignal.timeout(20_000),
+    });
+    const html = await response.text();
+    result.watchPageStatus = response.status;
+    result.watchPageBytes = Buffer.byteLength(html);
+    const playerResponse = extractInitialPlayerResponse(html);
+    result.playability = {
+      status: playerResponse.playabilityStatus?.status ?? null,
+      reason: playerResponse.playabilityStatus?.reason ?? null,
+    };
+    if (result.playability.status !== 'OK') {
+      const error = new Error(result.playability.reason || `Playability: ${result.playability.status}`);
+      error.code = result.playability.status || 'UNPLAYABLE';
+      throw error;
+    }
+    const format = selectHtmlAudioFormat(playerResponse);
+    result.formats = playerResponse.streamingData?.adaptiveFormats?.length ?? 0;
+    result.selectedFormat = {
+      itag: format.itag,
+      mime: format.mimeType,
+      bitrate: format.averageBitrate ?? format.bitrate ?? null,
+    };
+    const resolver = await createResolver(path.join(outputDirectory, '.cache', 'watch-page'), {
+      generateSessionLocally: true,
+      enableSessionCache: false,
+    });
+    const streamUrl = await resolver.session.player.decipher(format.url, format.signatureCipher, format.cipher);
+    result.deciphered = Boolean(streamUrl);
+    result.googlevideo = await probeHttp(streamUrl, 20_000);
+    if (!result.googlevideo.success) throw Object.assign(new Error(result.googlevideo.error?.message || 'GoogleVideo probe failed'), result.googlevideo.error);
+    result.ffmpeg = await runFfmpeg(
+      streamUrl,
+      path.join(outputDirectory, `${videoId}_HTML_3s.wav`),
+      3,
+      45_000,
+      result.selectedFormat.bitrate ?? 192_000,
+    );
+    if (!result.ffmpeg.success) throw Object.assign(new Error(result.ffmpeg.error?.message || 'FFmpeg failed'), result.ffmpeg.error);
+    result.success = true;
+  } catch (error) {
+    result.error = classifyError(error);
+  }
+  if (result.ffmpeg) {
+    const { outputFile: _outputFile, stderr: _stderr, ...safeFfmpeg } = result.ffmpeg;
+    result.ffmpeg = safeFfmpeg;
+  }
+  return result;
+}
 
 function sanitizeAttempt(attempt) {
   const { streamUrl: _streamUrl, ...safe } = attempt;
@@ -198,6 +272,7 @@ async function runValidation() {
       }
       state.results.push(entry);
     }
+    state.htmlProbe = await runWatchPageProbe('jNQXAC9IVRw');
     state.summary = buildSummary(state.results);
     state.status = 'complete';
     console.log(`Validation complete: ${state.summary.fullSuccess.successes}/${state.summary.fullSuccess.total}`);
