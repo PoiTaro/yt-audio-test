@@ -61,3 +61,42 @@ Renderの無料Docker Web Serviceへ同じ実装をデプロイし、Singapore�
 全18件でplayability statusは`LOGIN_REQUIRED`、理由は「ログインして bot ではないことを確認してください」でした。format一覧や直URLが返る前の段階で止まっているため、GoogleVideo側のHTTP 403やFFmpeg処理が原因ではありません。
 
 今回の条件では、InnerTubeクライアントを切り替えるだけではRenderのデータセンターIP判定を回避できませんでした。ローカルは同じ動画・実装・Cookieなしで成功しているため、主な差は実行元ネットワークです。
+
+## 追加のRender検証
+
+専用Sessionをクライアントごとに作成し、15クライアント×3動画の45条件を比較しました。metadata応答は31/45でしたが、直URLは0/45でした。`ANDROID_VR`、`IOS`、`WEB`、`MWEB`、`ANDROID`、`TV`、`VISIONOS`は主に`LOGIN_REQUIRED`、埋め込み系は`UNPLAYABLE`または動画利用不可、Android Music/Studio系はPlayer APIのHTTP 400でした。
+
+YouTubeへSession dataを問い合わせずVisitor Dataをローカル生成する条件を、Singapore、Oregon、Frankfurtで比較しました。
+
+| リージョン | metadata | 直URL | 主結果 |
+|---|---:|---:|---|
+| Singapore | 12/15 | 0/15 | `LOGIN_REQUIRED` / `UNPLAYABLE` |
+| Oregon | 12/15 | 0/15 | `LOGIN_REQUIRED` / `UNPLAYABLE` |
+| Frankfurt | 0/15 | 0/15 | Player API HTTP 403 |
+
+リージョン変更、クライアント変更、専用Session、ローカルVisitor Dataだけでは改善しませんでした。
+
+## PO Token検証
+
+`bgutils-js`で同じ実行元IPからWeb PO Tokenを生成し、GoogleVideo URLへ`pot`を付与する実験を追加しました。
+
+- ローカル: MWEBでmetadata、直URL、HTTP 206、FFmpeg 10秒変換まで成功
+- Render Singapore: PO Token生成は成功したが、Player応答が`LOGIN_REQUIRED`のまま。直URL生成前で停止
+
+このTokenはGoogleVideo側の検証には使えますが、今回のRender IPで先に発生するPlayerのbot判定は解消しませんでした。
+
+さらに同一コンテナ内でChromiumを起動し、実際の埋め込みPlayer要求から`visitor_data`とセッションPO Tokenを取得するtrusted-session方式を試しました。通常埋め込み、privacy-enhanced埋め込み、watchページの3経路すべてでPlayer要素とPlayer API要求が現れず、Tokenを生成できませんでした。
+
+## ブラウザ拡張経由の検証
+
+`LuanRT/ytc-bridge` 1.2.0（commit `8f53620fb48daf197e04f69a0b5406132eaf6f8e`）を隔離したEdgeプロファイルへ読み込み、ローカル回線で解決したaudio-only URLを拡張のService WorkerからRange取得しました。
+
+| 項目 | 結果 |
+|---|---|
+| 拡張検出 | 成功 |
+| GoogleVideo | HTTP 206 |
+| 取得量 | 8192 bytes |
+| Content-Type | `audio/mp4` |
+| format | itag 140 / `mp4a.40.2` |
+
+この結果から、公開RenderサーバーでYouTube取得を完結させるのではなく、ユーザー側ブラウザ拡張で解決・音声取得し、取得済み音声データだけをRenderのMR処理APIへアップロードする構成が実行可能な突破口です。期限付きURLだけをRenderへ渡す方式では、再びRender IPからGoogleVideoへアクセスするため効果がありません。

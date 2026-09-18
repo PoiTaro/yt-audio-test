@@ -8,7 +8,7 @@
 2. そのURLから実際にバイトを読めたか
 3. FFmpegで先頭10秒をWAVへ変換できたか
 
-非公開、年齢制限、メンバー限定、地域制限などのアクセス制御を迂回する機能はありません。Cookie、Googleログイン、PO Tokenも使用しません。自分が利用権限を持つ動画、または検証利用が許可された公開動画だけで使用してください。YouTubeの利用規約や権利者の条件にも従ってください。
+非公開、年齢制限、メンバー限定、地域制限などのアクセス制御を迂回する機能はありません。CLIはCookie、Googleログイン、PO Tokenを使用しません。Render診断には任意のPO Token実験モードがあります。自分が利用権限を持つ動画、または検証利用が許可された公開動画だけで使用してください。YouTubeの利用規約や権利者の条件にも従ってください。
 
 ## 必要環境
 
@@ -99,3 +99,22 @@ YouTube.jsは非公式のInnerTubeクライアントで、YouTubeの仕様変更
 - `/`: 簡易ステータス画面
 
 RenderではDocker Web Serviceとしてデプロイしてください。`render.yaml`からBlueprintとして作成することもできます。検証はデプロイごとに一度実行され、結果はインスタンスのメモリに保持されます。
+
+追加の診断用環境変数:
+
+- `PO_TOKEN_MODE=webpo`: `bgutils-js`で同一IPのWeb PO Tokenを生成し、GoogleVideo URLへ付与
+- `SESSION_TOKEN_URL=http://127.0.0.1:8080/token`: 同一コンテナのChromium trusted-session generatorからPO TokenとVisitor Dataを取得
+
+これらは検証用です。Render SingaporeではどちらもPlayer段階の`LOGIN_REQUIRED`を解消できませんでした。
+
+## ブラウザ側取得の実証
+
+`browser-probe/`は、Chromium拡張のService WorkerからGoogleVideoをRange取得できるかを確認する最小ハーネスです。別途[LuanRT/ytc-bridge](https://github.com/LuanRT/ytc-bridge)をビルドして未パック拡張として読み込み、次を実行します。
+
+```powershell
+node browser-probe/server.js
+```
+
+拡張を入れたブラウザで`http://127.0.0.1:18181`を開くと、固定公開動画のaudio-only URLをローカルで解決し、先頭8KiBを拡張経由で取得します。実測ではHTTP 206、8192 bytes、`audio/mp4`、itag 140で成功しました。
+
+本番統合では、期限付きURLをRenderへ送るのではなく、拡張が音声バイトを取得してRenderへアップロードします。これによりYouTube/GoogleVideoへの接続はユーザー側ネットワークで完結し、RenderはMR処理だけを担当できます。
