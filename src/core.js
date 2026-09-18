@@ -158,6 +158,9 @@ export async function createResolver(cacheDirectory, options = {}) {
   if (typeof options.enableSessionCache === 'boolean') {
     config.enable_session_cache = options.enableSessionCache;
   }
+  if (options.visitorData) config.visitor_data = options.visitorData;
+  if (options.poToken) config.po_token = options.poToken;
+  if (typeof options.retrievePlayer === 'boolean') config.retrieve_player = options.retrievePlayer;
   return Innertube.create(config);
 }
 

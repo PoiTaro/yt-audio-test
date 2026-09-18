@@ -18,6 +18,7 @@ const outputDirectory = path.join(os.tmpdir(), 'youtube-audio-stream-probe');
 const sessionMode = process.env.SESSION_MODE || 'dedicated';
 const generateSessionLocally = process.env.GENERATE_SESSION_LOCALLY === 'true';
 const poTokenMode = process.env.PO_TOKEN_MODE || 'none';
+const sessionTokenUrl = process.env.SESSION_TOKEN_URL || '';
 
 const state = {
   status: 'starting',
@@ -40,6 +41,7 @@ const state = {
     login: false,
     poToken: poTokenMode === 'webpo',
     poTokenMode,
+    trustedSession: Boolean(sessionTokenUrl),
     sessionMode,
     generateSessionLocally,
   },
@@ -107,12 +109,36 @@ async function runValidation() {
   console.log(`Starting ${state.progress.totalAttempts} Render validation attempts`);
   try {
     const poMinter = poTokenMode === 'webpo' ? await createWebPoMinter() : null;
+    let trustedSession = null;
+    if (sessionTokenUrl) {
+      const deadline = Date.now() + 9 * 60_000;
+      let lastError = null;
+      while (Date.now() < deadline) {
+        try {
+          const response = await fetch(sessionTokenUrl, { signal: AbortSignal.timeout(10_000) });
+          if (!response.ok) throw new Error(`Session token server returned HTTP ${response.status}`);
+          const value = await response.json();
+          const sessionPoToken = value.po_token || value.potoken;
+          if (!sessionPoToken || !value.visitor_data) throw new Error('Session token response was incomplete');
+          trustedSession = { poToken: sessionPoToken, visitorData: value.visitor_data };
+          console.log('Trusted session token and visitor data: OK');
+          break;
+        } catch (error) {
+          lastError = error;
+          console.log(`Waiting for trusted session generator: ${error.message}`);
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+        }
+      }
+      if (!trustedSession) throw lastError || new Error('Trusted session generator timed out');
+    }
     let sharedYoutube = null;
     const dedicatedSessions = new Map();
     if (sessionMode === 'override') {
       sharedYoutube = await createResolver(path.join(outputDirectory, '.cache', 'shared'), {
         generateSessionLocally,
         enableSessionCache: false,
+        visitorData: trustedSession?.visitorData,
+        poToken: trustedSession?.poToken,
       });
     }
     for (const input of inputs) {
@@ -127,9 +153,11 @@ async function runValidation() {
             if (!dedicatedSessions.has(client)) {
               dedicatedSessions.set(client, await createResolver(path.join(outputDirectory, '.cache', client), {
                 client,
-                generateSessionLocally,
-                enableSessionCache: false,
-              }));
+              generateSessionLocally,
+              enableSessionCache: false,
+              visitorData: trustedSession?.visitorData,
+              poToken: trustedSession?.poToken,
+            }));
             }
             youtube = dedicatedSessions.get(client);
           }
@@ -140,7 +168,7 @@ async function runValidation() {
             outputDirectory,
             seconds: 10,
             requestClientOverride: sessionMode !== 'dedicated',
-            poToken,
+            poToken: poToken || trustedSession?.poToken || null,
             log: (message) => console.log(`[${videoId}][${client}] ${message}`),
           });
         } catch (error) {
