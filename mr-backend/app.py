@@ -13,13 +13,14 @@ import math
 import gc
 import ctypes
 import ipaddress
+from concurrent.futures import ThreadPoolExecutor
 from collections import defaultdict, deque
 from pathlib import Path
 from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
-from flask import Flask, jsonify, render_template, request, send_from_directory
+from flask import Flask, jsonify, redirect, render_template, request, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
@@ -133,6 +134,8 @@ PROCESSING_STATE_LOCK = threading.Lock()
 ACTIVE_PROCESSING = 0
 RATE_LIMITS: dict[str, deque[float]] = defaultdict(deque)
 RATE_LIMITS_LOCK = threading.Lock()
+RESULT_VIDEO_CACHE: dict[tuple[str, str, float], str] = {}
+RESULT_VIDEO_CACHE_LOCK = threading.Lock()
 
 
 @app.after_request
@@ -680,27 +683,41 @@ def _dtw_path_low_memory(
     accumulated = np.full((rows, columns), np.inf, dtype=np.float32)
     direction = np.zeros((rows, columns), dtype=np.uint8)
     accumulated[0, 0] = np.float32(1.0) - similarity[0, 0]
-    for row in range(1, rows):
-        accumulated[row, 0] = accumulated[row - 1, 0] + np.float32(1.0) - similarity[row, 0]
-        direction[row, 0] = 1
-    for column in range(1, columns):
-        accumulated[0, column] = accumulated[0, column - 1] + np.float32(1.0) - similarity[0, column]
-        direction[0, column] = 2
-    for row in range(1, rows):
-        for column in range(1, columns):
-            diagonal = accumulated[row - 1, column - 1]
-            upward = accumulated[row - 1, column]
-            leftward = accumulated[row, column - 1]
-            if diagonal <= upward and diagonal <= leftward:
-                previous = diagonal
-                direction[row, column] = 0
-            elif upward <= leftward:
-                previous = upward
-                direction[row, column] = 1
-            else:
-                previous = leftward
-                direction[row, column] = 2
-            accumulated[row, column] = previous + np.float32(1.0) - similarity[row, column]
+    # 反対角線上のセルは互いに依存しないため、NumPyでまとめて更新する。
+    # Pythonの二重ループと同じDTW経路を保ったまま、弱いCPUでも高速にする。
+    for diagonal_index in range(1, rows + columns - 1):
+        row_start = max(0, diagonal_index - (columns - 1))
+        row_end = min(rows - 1, diagonal_index)
+        row_indices = np.arange(row_start, row_end + 1, dtype=np.int32)
+        column_indices = diagonal_index - row_indices
+        candidate_costs = np.full((3, len(row_indices)), np.inf, dtype=np.float32)
+        has_diagonal = (row_indices > 0) & (column_indices > 0)
+        candidate_costs[0, has_diagonal] = accumulated[
+            row_indices[has_diagonal] - 1,
+            column_indices[has_diagonal] - 1,
+        ]
+        has_upward = row_indices > 0
+        candidate_costs[1, has_upward] = accumulated[
+            row_indices[has_upward] - 1,
+            column_indices[has_upward],
+        ]
+        has_leftward = column_indices > 0
+        candidate_costs[2, has_leftward] = accumulated[
+            row_indices[has_leftward],
+            column_indices[has_leftward] - 1,
+        ]
+        best_direction = np.argmin(candidate_costs, axis=0).astype(np.uint8)
+        previous_cost = np.take_along_axis(
+            candidate_costs,
+            best_direction[np.newaxis, :],
+            axis=0,
+        )[0]
+        accumulated[row_indices, column_indices] = (
+            previous_cost
+            + np.float32(1.0)
+            - similarity[row_indices, column_indices]
+        )
+        direction[row_indices, column_indices] = best_direction
 
     row, column = rows - 1, columns - 1
     path = [(row, column)]
@@ -1462,27 +1479,24 @@ def _extract(
         else None,
     }
     if video_name and FFMPEG_PATH:
-        try:
-            video_path = _media_path(video_name)
-            enhanced_video_url = _mux_result_video(
-                video_path,
-                enhanced_path,
-                offset,
-                "mr_removal_video_enhanced.mp4",
-            )
-            natural_video_url = _mux_result_video(
-                video_path,
-                natural_path,
-                offset,
-                "mr_removal_video_natural.mp4",
-            )
-            if enhanced_video_url:
-                result["result_video_url"] = enhanced_video_url
-            if natural_video_url:
-                result["result_video_natural_url"] = natural_video_url
-        except FileNotFoundError:
-            # 音声結果は完成しているため、動画化だけ失敗しても抽出結果は返す。
-            pass
+        # プレビューは元動画＋抽出音声をブラウザで同期再生できる。
+        # ダウンロード用動画は利用者が押した時だけ生成し、初回結果を45秒待たせない。
+        result["result_video_url"] = "/render-video?" + urlparse.urlencode(
+            {
+                "video": video_name,
+                "audio": enhanced_name,
+                "offset": offset,
+                "variant": "enhanced",
+            }
+        )
+        result["result_video_natural_url"] = "/render-video?" + urlparse.urlencode(
+            {
+                "video": video_name,
+                "audio": natural_name,
+                "offset": offset,
+                "variant": "natural",
+            }
+        )
     return result
 
 
@@ -1628,48 +1642,77 @@ def _download_media_from_worker(
     try:
         position = 0
         with source_path.open("wb") as output:
-            while total_bytes is None or position < total_bytes:
-                requested_end = (
-                    position + chunk_bytes - 1
-                    if total_bytes is None
-                    else min(position + chunk_bytes - 1, total_bytes - 1)
-                )
-                try:
-                    part = _fetch_worker_range_with_retry(
-                        endpoint, url, token, position, requested_end, region, format_hint
-                    )
-                except RuntimeError as original_error:
-                    # 選択地域が途中で拒否された場合、1 MiB以降を再試験して切り替える。
-                    if total_bytes and total_bytes > probe_start:
-                        probe = _fetch_worker_range_with_retry(
+            if total_bytes is not None:
+                if total_bytes > app.config["MAX_CONTENT_LENGTH"]:
+                    raise RuntimeError(f"取得メディアが上限（{MAX_CONTENT_MB} MB）を超えています。")
+                ranges = [
+                    (start, min(start + chunk_bytes - 1, total_bytes - 1))
+                    for start in range(0, total_bytes, chunk_bytes)
+                ]
+
+                def fetch_part(byte_range: tuple[int, int]):
+                    start, end = byte_range
+                    try:
+                        return _fetch_worker_range_with_retry(
                             endpoint,
                             url,
                             token,
-                            probe_start,
-                            min(probe_start + chunk_bytes - 1, total_bytes - 1),
+                            start,
+                            end,
+                            region,
+                            format_hint,
+                        )
+                    except RuntimeError:
+                        # 選択地域が一時的に拒否した範囲だけ、自動選択で取り直す。
+                        return _fetch_worker_range_with_retry(
+                            endpoint,
+                            url,
+                            token,
+                            start,
+                            end,
                             None,
                             format_hint,
                         )
-                        if probe[3] != total_bytes or not probe[4]:
-                            raise original_error
-                        region = probe[4]
-                        part = _fetch_worker_range_with_retry(
-                            endpoint, url, token, position, requested_end, region, format_hint
-                        )
-                    else:
-                        raise
-                payload, actual_start, actual_end, part_total, part_region, part_type = part
-                if total_bytes is None:
-                    total_bytes = part_total
-                if part_total != total_bytes or actual_start != position:
-                    raise RuntimeError("地域Resolverの総サイズまたは分割位置が途中で変わりました。")
-                if total_bytes > app.config["MAX_CONTENT_LENGTH"]:
-                    raise RuntimeError(f"取得メディアが上限（{MAX_CONTENT_MB} MB）を超えています。")
-                if part_region:
-                    region = part_region
-                content_type = part_type
-                output.write(payload)
-                position = actual_end + 1
+
+                # 4範囲ずつ並列取得し、書込み順とメモリ上限は維持する。
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    for batch_start in range(0, len(ranges), 4):
+                        batch = ranges[batch_start : batch_start + 4]
+                        parts = list(executor.map(fetch_part, batch))
+                        for expected_range, part in zip(batch, parts):
+                            payload, actual_start, actual_end, part_total, part_region, part_type = part
+                            if part_total != total_bytes or actual_start != expected_range[0]:
+                                raise RuntimeError(
+                                    "地域Resolverの総サイズまたは分割位置が途中で変わりました。"
+                                )
+                            if actual_end != expected_range[1]:
+                                raise RuntimeError("地域Resolverの分割終端が要求と一致しません。")
+                            content_type = part_type
+                            output.write(payload)
+                            position = actual_end + 1
+            else:
+                # サイズを事前取得できない短い素材だけ、従来どおり直列で読む。
+                while total_bytes is None or position < total_bytes:
+                    requested_end = (
+                        position + chunk_bytes - 1
+                        if total_bytes is None
+                        else min(position + chunk_bytes - 1, total_bytes - 1)
+                    )
+                    part = _fetch_worker_range_with_retry(
+                        endpoint, url, token, position, requested_end, region, format_hint
+                    )
+                    payload, actual_start, actual_end, part_total, part_region, part_type = part
+                    if total_bytes is None:
+                        total_bytes = part_total
+                    if part_total != total_bytes or actual_start != position:
+                        raise RuntimeError("地域Resolverの総サイズまたは分割位置が途中で変わりました。")
+                    if total_bytes > app.config["MAX_CONTENT_LENGTH"]:
+                        raise RuntimeError(f"取得メディアが上限（{MAX_CONTENT_MB} MB）を超えています。")
+                    if part_region:
+                        region = part_region
+                    content_type = part_type
+                    output.write(payload)
+                    position = actual_end + 1
 
         if total_bytes is None or source_path.stat().st_size != total_bytes:
             raise RuntimeError("地域Resolverから取得したメディアが不完全です。")
@@ -1796,6 +1839,36 @@ def media(filename: str):
     return response
 
 
+@app.get("/render-video")
+def render_video():
+    """ダウンロード用の音声差替え動画を、要求された時だけ生成する。"""
+    video_name = Path(str(request.args.get("video", ""))).name
+    audio_name = Path(str(request.args.get("audio", ""))).name
+    variant = "natural" if request.args.get("variant") == "natural" else "enhanced"
+    try:
+        offset = max(0.0, min(60.0, float(request.args.get("offset", "0"))))
+        video_path = _media_path(video_name)
+        audio_path = _media_path(audio_name)
+    except (ValueError, FileNotFoundError) as error:
+        return jsonify(error=str(error)), 404
+    cache_key = (video_name, audio_name, round(offset, 4))
+    with RESULT_VIDEO_CACHE_LOCK:
+        cached_name = RESULT_VIDEO_CACHE.get(cache_key)
+        if cached_name and (MEDIA_DIR / cached_name).is_file():
+            return redirect(f"/media/{cached_name}", code=302)
+        result_url = _mux_result_video(
+            video_path,
+            audio_path,
+            offset,
+            f"mr_removal_video_{variant}.mp4",
+        )
+        if not result_url:
+            return jsonify(error="結果動画を生成できませんでした。"), 500
+        result_name = Path(result_url).name
+        RESULT_VIDEO_CACHE[cache_key] = result_name
+    return redirect(result_url, code=302)
+
+
 @app.post("/upload")
 def upload():
     video = request.files.get("video")
@@ -1897,22 +1970,40 @@ def download():
 def _run_download(video_url: str, karaoke_url: str, progress=None) -> dict:
     video_url = _validate_youtube_url(video_url)
     karaoke_url = _validate_youtube_url(karaoke_url) if karaoke_url else ""
+    started_at = time.perf_counter()
 
     def report(value: int, message: str) -> None:
+        app.logger.info(
+            "pipeline progress=%s elapsed=%.2fs stage=%s",
+            value,
+            time.perf_counter() - started_at,
+            message,
+        )
         if progress:
             progress(value, message)
 
-    # まず抽出に必要な音声を取得する。動画取得はプレビュー用の補助機能。
-    report(7, "ステージ動画の音声を取得しています")
-    original_name = _download_audio(video_url, "original")
-    report(26, "動画プレビューを取得しています")
-    preview_name = original_name
-    preview_is_audio_only = True
-    try:
-        preview_name = _download_video(video_url)
-        preview_is_audio_only = False
-    except Exception:
-        pass
+    # ステージ音声・プレビュー動画・比較音源は互いに独立しているため、
+    # Resolver取得とFFmpeg変換を同時に進める。
+    report(7, "必要な動画と音声を同時に取得しています")
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        original_future = executor.submit(_download_audio, video_url, "original")
+        preview_future = executor.submit(_download_video, video_url)
+        karaoke_future = (
+            executor.submit(_download_audio, karaoke_url, "karaoke")
+            if karaoke_url
+            else None
+        )
+        original_name = original_future.result()
+        report(26, "ステージ音声を取得しました")
+        preview_name = original_name
+        preview_is_audio_only = True
+        try:
+            preview_name = preview_future.result()
+            preview_is_audio_only = False
+        except Exception:
+            pass
+        report(43, "動画プレビューを取得しました")
+        karaoke_name = karaoke_future.result() if karaoke_future else None
 
     response = {
         "video_url": f"/media/{preview_name}",
@@ -1921,9 +2012,7 @@ def _run_download(video_url: str, karaoke_url: str, progress=None) -> dict:
         "video_audio_filename": original_name,
         "preview_is_audio_only": preview_is_audio_only,
     }
-    if karaoke_url:
-        report(43, "MV・公式音源を取得しています")
-        karaoke_name = _download_audio(karaoke_url, "karaoke")
+    if karaoke_name:
         response["karaoke_filename"] = karaoke_name
         response.update(
             _extract(
