@@ -5,6 +5,7 @@ import {
   extractVideoId,
   parseContentRange,
   selectBestAudio,
+  selectBestVideo,
 } from '../cloudflare-worker/src/resolver.js';
 
 test('extractVideoId accepts common YouTube URL forms', () => {
@@ -35,6 +36,15 @@ test('selectBestAudio prefers non-DRC Opus/WebM and then highest bitrate', () =>
     { itag: 4, mimeType: 'audio/webm', cipher: 'url=x', bitrate: 150_000 },
   ] } });
   assert.equal(selected.itag, 4);
+});
+
+test('selectBestVideo chooses an audio-bearing MP4 preview', () => {
+  const selected = selectBestVideo({ streamingData: { formats: [
+    { itag: 17, mimeType: 'video/3gpp', audioQuality: 'AUDIO_QUALITY_LOW', height: 144, url: 'https://example.test/17' },
+    { itag: 18, mimeType: 'video/mp4', audioQuality: 'AUDIO_QUALITY_LOW', height: 360, url: 'https://example.test/18' },
+    { itag: 22, mimeType: 'video/mp4', audioQuality: 'AUDIO_QUALITY_MEDIUM', height: 720, url: 'https://example.test/22' },
+  ] } });
+  assert.equal(selected.itag, 22);
 });
 
 test('parseContentRange validates bounded byte ranges', () => {

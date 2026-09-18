@@ -18,8 +18,8 @@
     }
   },
   "vars": {
-    "PLACEMENT_EPOCH": "v1",
-    "RESOLVER_REGIONS": "apac-ne,apac-se,weur,enam",
+    "PLACEMENT_EPOCH": "v2",
+    "RESOLVER_REGIONS": "apac-ne,apac-se,weur,enam,wnam,sam",
     "RENDER_DECIPHER_URL": "https://yt-audio-test.onrender.com/api/decipher"
   }
 }

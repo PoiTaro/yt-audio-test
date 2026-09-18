@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { extractVideoId, resolveAndFetchAudio, serializeResolverError } from './resolver.js';
+import { extractVideoId, resolveAndFetchMedia, serializeResolverError } from './resolver.js';
 
 const DEFAULT_REGIONS = ['apac-ne', 'apac-se', 'weur', 'enam'];
 const VALID_REGIONS = new Set(['wnam', 'enam', 'sam', 'weur', 'eeur', 'apac', 'apac-ne', 'apac-se', 'oc', 'afr', 'me']);
@@ -33,15 +33,18 @@ export class RegionalResolver extends DurableObject {
   async fetch(request) {
     const url = new URL(request.url);
     const videoId = url.searchParams.get('videoId');
+    const mediaType = url.searchParams.get('mediaType') === 'video' ? 'video' : 'audio';
     const region = request.headers.get('X-Resolver-Region') || 'unknown';
     if (!videoId) return json({ error: { code: 'MISSING_VIDEO_ID', message: 'videoId is required' }, region }, 400);
     if (!this.env.RENDER_DECIPHER_URL) {
       return json({ error: { code: 'MISSING_DECIPHER_URL', message: 'RENDER_DECIPHER_URL is not configured' }, region }, 503);
     }
     try {
-      const cached = this.resolutionCache.get(videoId);
-      const run = (cachedResolution) => resolveAndFetchAudio({
+      const cacheKey = `${mediaType}:${videoId}`;
+      const cached = this.resolutionCache.get(cacheKey);
+      const run = (cachedResolution) => resolveAndFetchMedia({
           videoId,
+          mediaType,
           renderDecipherUrl: this.env.RENDER_DECIPHER_URL,
           decipherToken: this.env.DECIPHER_TOKEN,
           range: request.headers.get('Range'),
@@ -52,14 +55,14 @@ export class RegionalResolver extends DurableObject {
         result = await run(cached?.expiresAt > Date.now() ? cached.resolution : null);
       } catch (error) {
         if (!cached) throw error;
-        this.resolutionCache.delete(videoId);
+        this.resolutionCache.delete(cacheKey);
         result = await run(null);
       }
       const expireSeconds = Number(new URL(result.resolution.streamUrl).searchParams.get('expire'));
       const expiresAt = Number.isFinite(expireSeconds)
         ? Math.min(expireSeconds * 1_000 - 60_000, Date.now() + 10 * 60_000)
         : Date.now() + 5 * 60_000;
-      this.resolutionCache.set(videoId, { resolution: result.resolution, expiresAt });
+      this.resolutionCache.set(cacheKey, { resolution: result.resolution, expiresAt });
       const headers = new Headers();
       for (const name of ['accept-ranges', 'content-length', 'content-range', 'etag', 'last-modified']) {
         const value = result.response.headers.get(name);
@@ -88,7 +91,7 @@ export default {
         authConfigured: Boolean(env.WORKER_TOKEN),
       });
     }
-    if (url.pathname !== '/audio') return json({ error: 'Not found' }, 404);
+    if (url.pathname !== '/audio' && url.pathname !== '/video') return json({ error: 'Not found' }, 404);
     if (request.method !== 'GET') return json({ error: 'Method not allowed' }, 405, { Allow: 'GET' });
     if (!authorized(request, env)) return json({ error: 'Unauthorized' }, 401);
 
@@ -111,6 +114,7 @@ export default {
       const stub = env.REGIONAL_RESOLVER.getByName(objectName, { locationHint: region });
       const regionalUrl = new URL('https://regional-resolver.internal/resolve');
       regionalUrl.searchParams.set('videoId', videoId);
+      regionalUrl.searchParams.set('mediaType', url.pathname === '/video' ? 'video' : 'audio');
       try {
         const response = await stub.fetch(regionalUrl, {
           headers: {

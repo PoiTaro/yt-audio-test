@@ -2,6 +2,13 @@ const MOBILE_USER_AGENT = 'Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro) AppleWeb
 const INNERTUBE_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
 const INNERTUBE_CLIENTS = [
   {
+    name: 'MWEB',
+    id: '2',
+    version: '2.20260205.04.01',
+    userAgent: MOBILE_USER_AGENT,
+    extra: { osName: 'Android', osVersion: '14', platform: 'MOBILE' },
+  },
+  {
     name: 'ANDROID_VR',
     id: '28',
     version: '1.65.10',
@@ -14,13 +21,6 @@ const INNERTUBE_CLIENTS = [
     version: '21.03.36',
     userAgent: 'com.google.android.youtube/21.03.36(Linux; U; Android 16; en_US; SM-S908E Build/TP1A.220624.014) gzip',
     extra: { androidSdkVersion: 36, osName: 'Android', osVersion: '16', platform: 'MOBILE', deviceMake: 'Samsung', deviceModel: 'SM-S908E' },
-  },
-  {
-    name: 'MWEB',
-    id: '2',
-    version: '2.20260205.04.01',
-    userAgent: MOBILE_USER_AGENT,
-    extra: { osName: 'Android', osVersion: '14', platform: 'MOBILE' },
   },
   {
     name: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
@@ -144,6 +144,28 @@ export function selectBestAudio(playerResponse) {
   })[0];
 }
 
+export function selectBestVideo(playerResponse) {
+  const formats = (playerResponse?.streamingData?.formats ?? [])
+    .filter((format) => format.mimeType?.startsWith('video/')
+      && (format.audioQuality || format.audioChannels)
+      && (format.url || format.signatureCipher || format.cipher));
+  if (!formats.length) throw new ResolverError('NO_VIDEO_FORMAT', '音声付き動画formatがありません。');
+  return [...formats].sort((a, b) => {
+    const mp4Score = Number(!a.mimeType?.startsWith('video/mp4'))
+      - Number(!b.mimeType?.startsWith('video/mp4'));
+    if (mp4Score) return mp4Score;
+    const aHeight = a.height ?? 0;
+    const bHeight = b.height ?? 0;
+    const boundedScore = Number(aHeight > 720) - Number(bHeight > 720);
+    if (boundedScore) return boundedScore;
+    return bHeight - aHeight || (b.bitrate ?? 0) - (a.bitrate ?? 0);
+  })[0];
+}
+
+function selectBestMedia(playerResponse, mediaType) {
+  return mediaType === 'video' ? selectBestVideo(playerResponse) : selectBestAudio(playerResponse);
+}
+
 function playerIdFrom(value) {
   return value?.match?.(/\/s\/player\/([A-Za-z0-9_-]+)\//)?.[1] ?? null;
 }
@@ -180,7 +202,7 @@ async function fetchWatchResponse(videoId, diagnostics) {
   return { html, playerResponse, playerId: playerIdFrom(playerResponse?.assets?.js) || playerIdFrom(html) };
 }
 
-async function fetchInnerTubeResponse(videoId, diagnostics, integrity) {
+async function fetchInnerTubeResponse(videoId, diagnostics, integrity, mediaType) {
   diagnostics.innerTube = [];
   for (const client of INNERTUBE_CLIENTS) {
     const response = await fetch(`https://www.youtube.com/youtubei/v1/player?prettyPrint=false&key=${INNERTUBE_API_KEY}`, {
@@ -220,6 +242,10 @@ async function fetchInnerTubeResponse(videoId, diagnostics, integrity) {
       .filter((format) => format.mimeType?.startsWith('audio/'));
     const usableAudioFormats = audioFormats
       .filter((format) => format.url || format.signatureCipher || format.cipher);
+    const videoFormats = (result?.streamingData?.formats ?? [])
+      .filter((format) => format.mimeType?.startsWith('video/') && (format.audioQuality || format.audioChannels));
+    const usableVideoFormats = videoFormats
+      .filter((format) => format.url || format.signatureCipher || format.cipher);
     diagnostics.innerTube.push({
       client: client.name,
       status: response.status,
@@ -227,8 +253,10 @@ async function fetchInnerTubeResponse(videoId, diagnostics, integrity) {
       reason: result?.playabilityStatus?.reason ?? null,
       audioFormats: audioFormats.length,
       usableAudioFormats: usableAudioFormats.length,
+      videoFormats: videoFormats.length,
+      usableVideoFormats: usableVideoFormats.length,
     });
-    if (usableAudioFormats.length > 0) return result;
+    if (mediaType === 'video' ? usableVideoFormats.length > 0 : usableAudioFormats.length > 0) return result;
   }
   return null;
 }
@@ -266,8 +294,9 @@ async function fetchFallbackPlayerId() {
   return playerIdFrom(await response.text());
 }
 
-function safeContentType(value) {
-  return value && /^audio\//i.test(value) ? value : 'application/octet-stream';
+function safeContentType(value, mediaType) {
+  const expected = mediaType === 'video' ? /^video\//i : /^audio\//i;
+  return value && expected.test(value) ? value : 'application/octet-stream';
 }
 
 export function parseContentRange(value) {
@@ -290,36 +319,40 @@ function googleVideoHeaders(range) {
   };
 }
 
-export async function resolveAndFetchAudio({
+export async function resolveAndFetchMedia({
   videoId,
+  mediaType = 'audio',
   renderDecipherUrl,
   decipherToken,
   range,
   cachedResolution = null,
 }) {
   const startedAt = Date.now();
-  const diagnostics = { videoId };
+  const diagnostics = { videoId, mediaType };
   let resolution = cachedResolution;
   if (!resolution) {
     const integrity = await fetchPoTokens(videoId, renderDecipherUrl, decipherToken, diagnostics);
     const watch = await fetchWatchResponse(videoId, diagnostics);
-    let playerResponse = watch.playerResponse;
-    try {
-      selectBestAudio(playerResponse);
-    } catch {
-      playerResponse = await fetchInnerTubeResponse(videoId, diagnostics, integrity);
+    // PO TokenとVisitor IDを付けたInnerTube応答を優先する。watchページ由来の
+    // URLは別Visitorへ結び付くことがあり、同じTokenを付けても403になる。
+    let playerResponse = await fetchInnerTubeResponse(videoId, diagnostics, integrity, mediaType);
+    if (!playerResponse) {
+      playerResponse = watch.playerResponse;
+      try { selectBestMedia(playerResponse, mediaType); } catch { playerResponse = null; }
     }
     if (!playerResponse) {
       const status = diagnostics.watch?.playability || diagnostics.innerTube?.at(-1)?.playability || 'UNPLAYABLE';
       throw new ResolverError(status, 'この実行地域では再生可能な応答を取得できませんでした。', diagnostics);
     }
 
-    const format = selectBestAudio(playerResponse);
+    const format = selectBestMedia(playerResponse, mediaType);
     const playerId = playerIdFrom(playerResponse?.assets?.js) || watch.playerId || await fetchFallbackPlayerId();
     diagnostics.format = {
       itag: format.itag ?? null,
       mimeType: format.mimeType ?? null,
       bitrate: format.averageBitrate ?? format.bitrate ?? null,
+      width: format.width ?? null,
+      height: format.height ?? null,
     };
 
     let deciphered = {};
@@ -350,15 +383,33 @@ export async function resolveAndFetchAudio({
       }
     }
     const resolvedStreamUrl = new URL(deciphered.url);
-    const totalBytes = Number(format.contentLength || resolvedStreamUrl.searchParams.get('clen'));
+    const cpn = crypto.randomUUID().replaceAll('-', '').slice(0, 16);
+    let totalBytes = Number(format.contentLength || resolvedStreamUrl.searchParams.get('clen'));
     if (!Number.isSafeInteger(totalBytes) || totalBytes <= 0) {
-      throw new ResolverError('NO_CONTENT_LENGTH', '音声ストリームの全体サイズを取得できませんでした。', diagnostics);
+      const lengthProbeUrl = new URL(resolvedStreamUrl);
+      lengthProbeUrl.searchParams.set('pot', integrity.poToken);
+      lengthProbeUrl.searchParams.append('cpn', cpn);
+      const lengthProbe = await fetch(lengthProbeUrl, {
+        headers: googleVideoHeaders('bytes=0-0'),
+        redirect: 'follow',
+      });
+      const probedRange = parseContentRange(lengthProbe.headers.get('content-range'));
+      diagnostics.lengthProbe = {
+        status: lengthProbe.status,
+        contentLength: lengthProbe.headers.get('content-length'),
+        contentRange: lengthProbe.headers.get('content-range'),
+      };
+      await lengthProbe.body?.cancel();
+      if (lengthProbe.status === 206 && probedRange) totalBytes = probedRange.total;
+    }
+    if (!Number.isSafeInteger(totalBytes) || totalBytes <= 0) {
+      throw new ResolverError('NO_CONTENT_LENGTH', 'メディアストリームの全体サイズを取得できませんでした。', diagnostics);
     }
     resolution = {
       streamUrl: deciphered.url,
       format: diagnostics.format,
       totalBytes,
-      cpn: crypto.randomUUID().replaceAll('-', '').slice(0, 16),
+      cpn,
       poToken: integrity.poToken,
     };
   } else {
@@ -429,7 +480,7 @@ export async function resolveAndFetchAudio({
   return {
     response: streamResponse,
     diagnostics,
-    contentType: safeContentType(streamResponse.headers.get('content-type')),
+    contentType: safeContentType(streamResponse.headers.get('content-type'), mediaType),
     resolution,
   };
 }
