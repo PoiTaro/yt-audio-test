@@ -1,4 +1,5 @@
 import io
+import subprocess
 import time
 import threading
 import unittest
@@ -245,6 +246,106 @@ class SecurityBoundaryTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("YouTube", response.get_json()["error"])
+
+    def test_uploaded_stage_video_is_split_into_preview_and_analysis_audio(self):
+        video_name = f"stage_{uuid.uuid4().hex}.mp4"
+        karaoke_name = f"mv_{uuid.uuid4().hex}.wav"
+        video_path = backend.MEDIA_DIR / video_name
+        karaoke_path = backend.MEDIA_DIR / karaoke_name
+        video_path.write_bytes(b"video")
+        karaoke_path.write_bytes(b"audio")
+        try:
+            with (
+                mock.patch.object(
+                    backend,
+                    "_extract_uploaded_video_audio",
+                    return_value="stage_audio_test.wav",
+                ) as split_audio,
+                mock.patch.object(
+                    backend,
+                    "_extract",
+                    return_value={"vocal_url": "/media/vocal.wav"},
+                ) as extract,
+            ):
+                result = backend._run_sources(
+                    video_name=video_name,
+                    karaoke_name=karaoke_name,
+                    preview_is_audio_only=False,
+                )
+
+            split_audio.assert_called_once_with(video_name)
+            self.assertEqual(result["video_filename"], video_name)
+            self.assertEqual(result["video_audio_filename"], "stage_audio_test.wav")
+            self.assertFalse(result["preview_is_audio_only"])
+            self.assertEqual(extract.call_args.args[0], "stage_audio_test.wav")
+            self.assertEqual(extract.call_args.args[1], karaoke_name)
+            self.assertEqual(extract.call_args.args[4], video_name)
+        finally:
+            video_path.unlink(missing_ok=True)
+            karaoke_path.unlink(missing_ok=True)
+
+    @unittest.skipUnless(
+        backend.FFMPEG_PATH and backend.FFPROBE_PATH,
+        "FFmpeg and FFprobe are required",
+    )
+    def test_video_audio_split_produces_mono_44100_wav(self):
+        video_name = f"split_source_{uuid.uuid4().hex}.mp4"
+        video_path = backend.MEDIA_DIR / video_name
+        audio_path = None
+        try:
+            subprocess.run(
+                [
+                    backend.FFMPEG_PATH,
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=160x90:d=1",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=1",
+                    "-shortest",
+                    "-c:v",
+                    "mpeg4",
+                    "-c:a",
+                    "aac",
+                    str(video_path),
+                ],
+                check=True,
+                capture_output=True,
+                timeout=30,
+            )
+            audio_name = backend._extract_uploaded_video_audio(video_name)
+            audio_path = backend.MEDIA_DIR / audio_name
+            probe = subprocess.run(
+                [
+                    backend.FFPROBE_PATH,
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a:0",
+                    "-show_entries",
+                    "stream=sample_rate,channels,codec_name",
+                    "-of",
+                    "default=noprint_wrappers=1",
+                    str(audio_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            self.assertIn("codec_name=pcm_s16le", probe.stdout)
+            self.assertIn("sample_rate=44100", probe.stdout)
+            self.assertIn("channels=1", probe.stdout)
+        finally:
+            video_path.unlink(missing_ok=True)
+            if audio_path:
+                audio_path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
