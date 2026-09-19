@@ -87,14 +87,44 @@
       </section>
 
       <details class="file-source">
-        <summary>保存済みのファイルを使う</summary>
+        <summary>ファイルとYouTubeを組み合わせる</summary>
         <div class="file-source__body">
           <form id="uploadForm" novalidate>
             <div class="source-list">
-              <div class="source-row"><div class="source-number" aria-hidden="true">1</div><div class="source-copy"><label for="videoInput">ステージ動画</label><p>歌声入り</p></div><label class="file-control" for="videoInput"><span class="file-control__label">選ぶ</span><span class="file-control__name" id="videoFileName">未選択</span><input id="videoInput" name="video" type="file" accept="video/*,audio/*" required></label></div>
-              <div class="source-row"><div class="source-number" aria-hidden="true">2</div><div class="source-copy"><label for="karaInput">MV・公式音源 <em>必須</em></label><p>生歌じゃない同じ曲</p></div><label class="file-control" for="karaInput"><span class="file-control__label">選ぶ</span><span class="file-control__name" id="karaFileName">未選択</span><input id="karaInput" name="karaoke" type="file" accept="audio/*,video/*" required></label></div>
+              <div class="source-row" data-source-row="video">
+                <div class="source-number" aria-hidden="true">1</div>
+                <div class="source-copy"><strong>ステージ動画・音源</strong><p>歌声入り</p></div>
+                <div class="source-inputs">
+                  <div class="source-method" role="group" aria-label="ステージ素材の入力方法">
+                    <button class="source-method__button is-active" type="button" data-source-mode="file" aria-pressed="true">ファイル</button>
+                    <button class="source-method__button" type="button" data-source-mode="url" aria-pressed="false">YouTube</button>
+                  </div>
+                  <div class="source-panel" data-source-panel="file">
+                    <label class="file-control" for="videoInput"><span class="file-control__label">選ぶ</span><span class="file-control__name" id="videoFileName">未選択</span><input id="videoInput" name="video" type="file" accept="video/*,audio/*"></label>
+                  </div>
+                  <div class="source-panel hidden" data-source-panel="url">
+                    <div class="source-url-control"><input id="videoFileUrlInput" type="url" autocomplete="url" inputmode="url" placeholder="YouTubeのURL"><button type="button" data-paste-target="videoFileUrlInput">ペースト</button></div>
+                  </div>
+                </div>
+              </div>
+              <div class="source-row" data-source-row="karaoke">
+                <div class="source-number" aria-hidden="true">2</div>
+                <div class="source-copy"><strong>MV・公式音源 <em>必須</em></strong><p>生歌じゃない同じ曲</p></div>
+                <div class="source-inputs">
+                  <div class="source-method" role="group" aria-label="MV・公式音源の入力方法">
+                    <button class="source-method__button is-active" type="button" data-source-mode="file" aria-pressed="true">ファイル</button>
+                    <button class="source-method__button" type="button" data-source-mode="url" aria-pressed="false">YouTube</button>
+                  </div>
+                  <div class="source-panel" data-source-panel="file">
+                    <label class="file-control" for="karaInput"><span class="file-control__label">選ぶ</span><span class="file-control__name" id="karaFileName">未選択</span><input id="karaInput" name="karaoke" type="file" accept="audio/*,video/*"></label>
+                  </div>
+                  <div class="source-panel hidden" data-source-panel="url">
+                    <div class="source-url-control"><input id="karaFileUrlInput" type="url" autocomplete="url" inputmode="url" placeholder="YouTubeのURL"><button type="button" data-paste-target="karaFileUrlInput">ペースト</button></div>
+                  </div>
+                </div>
+              </div>
             </div>
-            <div class="form-footer"><button id="extractSubmit" class="button button--secondary" type="submit">ファイルから抽出</button></div>
+            <div class="form-footer"><button id="extractSubmit" class="button button--secondary" type="submit">選んだ素材から抽出</button></div>
           </form>
         </div>
       </details>
@@ -257,6 +287,6 @@
       </div>
     </div>
     <script src="/static/progress-model.js?v=smooth-progress-20260919"></script>
-    <script src="/static/app.js?v=smooth-results-20260919"></script>
+    <script src="/static/app.js?v=mixed-sources-20260919"></script>
   </body>
 </html>

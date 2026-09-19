@@ -1,3 +1,4 @@
+import io
 import time
 import threading
 import unittest
@@ -141,6 +142,109 @@ class SecurityBoundaryTests(unittest.TestCase):
                 self.fail("queued jobs did not finish")
 
         self.assertEqual(max_running, 1)
+
+    def test_mixed_job_accepts_stage_file_and_youtube_mv(self):
+        captured = {}
+
+        def fake_sources(**kwargs):
+            captured.update(kwargs)
+            return {"mixed": True}
+
+        with backend.RATE_LIMITS_LOCK:
+            backend.RATE_LIMITS.clear()
+            backend.GLOBAL_RATE_LIMITS.clear()
+        with (
+            mock.patch.object(backend, "_validate_media_duration", return_value=30.0),
+            mock.patch.object(backend, "_run_sources", side_effect=fake_sources),
+        ):
+            response = self.client.post(
+                "/mixed/start",
+                data={
+                    "video": (io.BytesIO(b"stage-audio"), "stage.mp3"),
+                    "kara_url": "https://youtu.be/jNQXAC9IVRw",
+                },
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(response.status_code, 202)
+            job_id = response.get_json()["job_id"]
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                state = backend._job_snapshot(job_id)
+                if state and state.get("status") == "complete":
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("mixed-source job did not finish")
+
+        self.assertTrue(captured["video_name"].endswith(".mp3"))
+        self.assertEqual(captured["video_url"], "")
+        self.assertIsNone(captured["karaoke_name"])
+        self.assertEqual(captured["karaoke_url"], "https://youtu.be/jNQXAC9IVRw")
+        (backend.MEDIA_DIR / captured["video_name"]).unlink(missing_ok=True)
+
+    def test_mixed_job_accepts_youtube_stage_and_mv_file(self):
+        captured = {}
+
+        def fake_sources(**kwargs):
+            captured.update(kwargs)
+            return {"mixed": True}
+
+        with backend.RATE_LIMITS_LOCK:
+            backend.RATE_LIMITS.clear()
+            backend.GLOBAL_RATE_LIMITS.clear()
+        with (
+            mock.patch.object(backend, "_validate_media_duration", return_value=30.0),
+            mock.patch.object(backend, "_run_sources", side_effect=fake_sources),
+        ):
+            response = self.client.post(
+                "/mixed/start",
+                data={
+                    "video_url": "https://youtu.be/jNQXAC9IVRw",
+                    "karaoke": (io.BytesIO(b"mv-audio"), "mv.mp3"),
+                },
+                content_type="multipart/form-data",
+            )
+            self.assertEqual(response.status_code, 202)
+            job_id = response.get_json()["job_id"]
+            deadline = time.time() + 3
+            while time.time() < deadline:
+                state = backend._job_snapshot(job_id)
+                if state and state.get("status") == "complete":
+                    break
+                time.sleep(0.02)
+            else:
+                self.fail("reverse mixed-source job did not finish")
+
+        self.assertIsNone(captured["video_name"])
+        self.assertEqual(captured["video_url"], "https://youtu.be/jNQXAC9IVRw")
+        self.assertTrue(captured["karaoke_name"].endswith(".mp3"))
+        self.assertEqual(captured["karaoke_url"], "")
+        (backend.MEDIA_DIR / captured["karaoke_name"]).unlink(missing_ok=True)
+
+    def test_mixed_job_requires_exactly_one_source_for_each_side(self):
+        response = self.client.post(
+            "/mixed/start",
+            data={
+                "video": (io.BytesIO(b"stage-audio"), "stage.mp3"),
+                "video_url": "https://youtu.be/jNQXAC9IVRw",
+                "kara_url": "https://youtu.be/jNQXAC9IVRw",
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("どちらか一方", response.get_json()["error"])
+
+    def test_mixed_job_rejects_non_youtube_url(self):
+        response = self.client.post(
+            "/mixed/start",
+            data={
+                "video_url": "https://example.com/video",
+                "kara_url": "https://youtu.be/jNQXAC9IVRw",
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("YouTube", response.get_json()["error"])
 
 
 if __name__ == "__main__":
