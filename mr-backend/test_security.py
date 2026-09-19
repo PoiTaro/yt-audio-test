@@ -1,4 +1,5 @@
 import io
+import re
 import subprocess
 import time
 import threading
@@ -17,11 +18,26 @@ class SecurityBoundaryTests(unittest.TestCase):
     def test_security_headers_are_present(self):
         response = self.client.get("/", base_url="https://example.test")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("default-src 'self'", response.headers["Content-Security-Policy"])
+        csp = response.headers["Content-Security-Policy"]
+        self.assertIn("default-src 'self'", csp)
+        self.assertIn("'strict-dynamic'", csp)
+        self.assertIn("https://adm.shinobi.jp", csp)
+        nonce_match = re.search(r"'nonce-([^']+)'", csp)
+        self.assertIsNotNone(nonce_match)
+        nonce = nonce_match.group(1)
+        html = response.get_data(as_text=True)
+        self.assertEqual(html.count(f'nonce="{nonce}"'), 3)
+        self.assertIn('data-admax-id="afacb567ef7200c0cdb5808f718cf760"', html)
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         self.assertEqual(response.headers["Cross-Origin-Opener-Policy"], "same-origin")
         self.assertIn("max-age=31536000", response.headers["Strict-Transport-Security"])
+
+    def test_privacy_policy_discloses_advertising_storage(self):
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn("忍者AdMaxによる広告", html)
+        self.assertIn("CookieやlocalStorage", html)
+        self.assertNotIn("広告配信を目的とするCookieを使用していません", html)
 
     def test_untrusted_browser_origin_cannot_start_processing(self):
         response = self.client.post(
