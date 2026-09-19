@@ -23,7 +23,7 @@ from urllib import error as urlerror
 from urllib import parse as urlparse
 from urllib import request as urlrequest
 
-from flask import Flask, Response, g, jsonify, redirect, render_template, request, send_from_directory
+from flask import Flask, Response, jsonify, redirect, render_template, request, send_from_directory
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.utils import secure_filename
 
@@ -166,16 +166,11 @@ def _add_frontend_cors_headers(response):
         response.headers["Access-Control-Expose-Headers"] = (
             "Accept-Ranges, Content-Length, Content-Range, Retry-After"
         )
-    csp_nonce = getattr(g, "csp_nonce", "")
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
-        "form-action 'self'; "
-        f"script-src 'self' 'nonce-{csp_nonce}' 'strict-dynamic' "
-        "https://adm.shinobi.jp https://cnobi.jp https://dmp.im-apps.net; "
-        "style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: https:; media-src 'self' blob:; frame-src https:; "
-        "connect-src 'self' https://adm.shinobi.jp https://cnobi.jp "
-        "https://dmp.im-apps.net " + " ".join(sorted(FRONTEND_ORIGINS))
+        "form-action 'self'; script-src 'self'; style-src 'self'; "
+        "img-src 'self' data: https://i.ytimg.com; media-src 'self' blob:; "
+        "connect-src 'self' " + " ".join(sorted(FRONTEND_ORIGINS))
     ).strip()
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
@@ -191,8 +186,6 @@ def _add_frontend_cors_headers(response):
 
 @app.before_request
 def _validate_request_origin_and_size():
-    # 実行を許可したscript要素だけに付ける、レスポンスごとのCSP nonce。
-    g.csp_nonce = secrets.token_urlsafe(18)
     if request.path in {"/extract", "/download", "/download/start", "/api/pot", "/api/decipher"}:
         content_length = request.content_length
         if content_length is not None and content_length > MAX_JSON_BODY_BYTES:
@@ -2197,7 +2190,7 @@ def _download_video(url: str) -> str:
 
 @app.get("/")
 def index():
-    return render_template("index.html", csp_nonce=g.csp_nonce)
+    return render_template("index.html")
 
 
 @app.get("/health")
