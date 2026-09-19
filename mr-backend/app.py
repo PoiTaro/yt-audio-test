@@ -415,6 +415,50 @@ def _public_error_message(error: Exception) -> str:
     return "処理中にエラーが発生しました。時間をおいてもう一度お試しください。"
 
 
+def _extract_uploaded_video_audio(video_name: str) -> str:
+    """アップロード動画をプレビュー用に残し、解析用mono WAVだけを分離する。"""
+    if not FFMPEG_PATH:
+        raise ValueError("動画から音声を取り出すためのFFmpegが見つかりません。")
+    video_path = _media_path(video_name)
+    audio_name = _unique_name("stage_audio.wav")
+    audio_path = MEDIA_DIR / audio_name
+    try:
+        conversion = subprocess.run(
+            [
+                FFMPEG_PATH,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(video_path),
+                "-vn",
+                "-ar",
+                str(SAMPLE_RATE),
+                "-ac",
+                "1",
+                "-c:a",
+                "pcm_s16le",
+                str(audio_path),
+            ],
+            capture_output=True,
+            timeout=180,
+        )
+        if conversion.returncode != 0:
+            raise ValueError(
+                "ステージ動画から音声を取り出せませんでした。音声を含む対応形式の動画をお使いください。"
+            )
+        if not audio_path.is_file() or audio_path.stat().st_size == 0:
+            raise ValueError("ステージ動画に利用可能な音声が見つかりませんでした。")
+        _validate_media_duration(audio_path)
+        return audio_name
+    except subprocess.TimeoutExpired as error:
+        raise ValueError("ステージ動画からの音声分離が時間切れになりました。") from error
+    except Exception:
+        audio_path.unlink(missing_ok=True)
+        raise
+
+
 def _unique_name(filename: str, fallback_extension: str = "") -> str:
     """衝突とパストラバーサルを防いだ、保存用のファイル名を返す。"""
     safe_name = secure_filename(filename) or "upload"
@@ -2302,10 +2346,14 @@ def upload():
         video.save(video_path)
         saved_paths.append(video_path)
         _validate_media_duration(video_path)
+        original_name = video_name
+        if not preview_is_audio_only:
+            original_name = _extract_uploaded_video_audio(video_name)
+            saved_paths.append(MEDIA_DIR / original_name)
         response = {
             "video_url": _media_url(video_name),
-            "video_audio_url": _media_url(video_name),
-            "video_audio_filename": video_name,
+            "video_audio_url": _media_url(original_name),
+            "video_audio_filename": original_name,
             "video_filename": video_name,
             "preview_is_audio_only": preview_is_audio_only,
         }
@@ -2318,7 +2366,7 @@ def upload():
             response["karaoke_filename"] = karaoke_name
             response.update(
                 _extract(
-                    video_name,
+                    original_name,
                     karaoke_name,
                     1.0,
                     video_name=video_name if not preview_is_audio_only else None,
@@ -2424,13 +2472,22 @@ def _run_sources(
     downloaded_from_youtube = bool(video_url or karaoke_url)
     report(7, "必要な動画と音声を準備しています")
     try:
-        if downloaded_from_youtube:
-            # URLで指定された素材だけを並列取得する。アップロード済み素材はそのまま使う。
-            worker_count = (2 if video_url else 0) + (1 if karaoke_url else 0)
+        needs_uploaded_video_audio = bool(
+            video_name and not preview_is_audio_only
+        )
+        worker_count = (
+            (2 if video_url else 0)
+            + (1 if karaoke_url else 0)
+            + (1 if needs_uploaded_video_audio else 0)
+        )
+        if worker_count:
+            # URL取得とアップロード動画の音声分離は独立しているため並列に進める。
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 original_future = (
                     executor.submit(_download_audio, video_url, "original")
                     if video_url
+                    else executor.submit(_extract_uploaded_video_audio, video_name)
+                    if needs_uploaded_video_audio and video_name
                     else None
                 )
                 preview_future = (
@@ -2445,8 +2502,9 @@ def _run_sources(
                 )
                 if original_future:
                     original_name = original_future.result()
-                    preview_name = original_name
-                    preview_is_audio_only = True
+                    if video_url:
+                        preview_name = original_name
+                        preview_is_audio_only = True
                 report(26, "ステージ音源を準備しました")
                 if preview_future:
                     try:
