@@ -146,7 +146,9 @@ ACTIVE_PROCESSING = 0
 RATE_LIMITS: dict[str, deque[float]] = defaultdict(deque)
 RATE_LIMITS_LOCK = threading.Lock()
 GLOBAL_RATE_LIMITS: deque[float] = deque()
-JOB_QUEUE: queue.Queue[tuple[str, str, str]] = queue.Queue(maxsize=MAX_QUEUED_JOBS)
+JOB_QUEUE: queue.Queue[tuple[str, str, dict[str, object]]] = queue.Queue(
+    maxsize=MAX_QUEUED_JOBS
+)
 RESULT_VIDEO_CACHE: dict[tuple[str, str, float], str] = {}
 RESULT_VIDEO_CACHE_LOCK = threading.Lock()
 
@@ -2384,9 +2386,27 @@ def download():
         _release_processing_slot()
 
 
-def _run_download(video_url: str, karaoke_url: str, progress=None) -> dict:
-    video_url = _validate_youtube_url(video_url)
+def _run_sources(
+    *,
+    video_name: str | None = None,
+    video_url: str = "",
+    karaoke_name: str | None = None,
+    karaoke_url: str = "",
+    preview_is_audio_only: bool = True,
+    progress=None,
+) -> dict:
+    """ファイルとYouTubeを任意に組み合わせ、同じ抽出処理へ渡す。"""
+    if bool(video_name) == bool(video_url):
+        raise ValueError("ステージ音源はファイルかYouTube URLのどちらか一方を指定してください。")
+    if bool(karaoke_name) == bool(karaoke_url):
+        raise ValueError("MV・公式音源はファイルかYouTube URLのどちらか一方を指定してください。")
+
+    video_url = _validate_youtube_url(video_url) if video_url else ""
     karaoke_url = _validate_youtube_url(karaoke_url) if karaoke_url else ""
+    if video_name:
+        _media_path(video_name)
+    if karaoke_name:
+        _media_path(karaoke_name)
     started_at = time.perf_counter()
 
     def report(value: int, message: str) -> None:
@@ -2399,31 +2419,52 @@ def _run_download(video_url: str, karaoke_url: str, progress=None) -> dict:
         if progress:
             progress(value, message)
 
-    # ステージ音声・プレビュー動画・比較音源は互いに独立しているため、
-    # Resolver取得とFFmpeg変換を同時に進める。
-    report(7, "必要な動画と音声を同時に取得しています")
+    original_name = video_name
+    preview_name = video_name
+    downloaded_from_youtube = bool(video_url or karaoke_url)
+    report(7, "必要な動画と音声を準備しています")
     try:
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            original_future = executor.submit(_download_audio, video_url, "original")
-            preview_future = executor.submit(_download_video, video_url)
-            karaoke_future = (
-                executor.submit(_download_audio, karaoke_url, "karaoke")
-                if karaoke_url
-                else None
-            )
-            original_name = original_future.result()
-            report(26, "ステージ音声を取得しました")
-            preview_name = original_name
-            preview_is_audio_only = True
-            try:
-                preview_name = preview_future.result()
-                preview_is_audio_only = False
-            except Exception:
-                pass
-            report(43, "動画プレビューを取得しました")
-            karaoke_name = karaoke_future.result() if karaoke_future else None
+        if downloaded_from_youtube:
+            # URLで指定された素材だけを並列取得する。アップロード済み素材はそのまま使う。
+            worker_count = (2 if video_url else 0) + (1 if karaoke_url else 0)
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                original_future = (
+                    executor.submit(_download_audio, video_url, "original")
+                    if video_url
+                    else None
+                )
+                preview_future = (
+                    executor.submit(_download_video, video_url)
+                    if video_url
+                    else None
+                )
+                karaoke_future = (
+                    executor.submit(_download_audio, karaoke_url, "karaoke")
+                    if karaoke_url
+                    else None
+                )
+                if original_future:
+                    original_name = original_future.result()
+                    preview_name = original_name
+                    preview_is_audio_only = True
+                report(26, "ステージ音源を準備しました")
+                if preview_future:
+                    try:
+                        preview_name = preview_future.result()
+                        preview_is_audio_only = False
+                    except Exception:
+                        pass
+                report(43, "プレビューを準備しました")
+                if karaoke_future:
+                    karaoke_name = karaoke_future.result()
+        else:
+            report(43, "アップロードした音源を確認しました")
     finally:
-        _release_integrated_node_worker()
+        if downloaded_from_youtube:
+            _release_integrated_node_worker()
+
+    if not original_name or not preview_name or not karaoke_name:
+        raise RuntimeError("抽出に必要な動画・音声を準備できませんでした。")
 
     response = {
         "video_url": _media_url(preview_name),
@@ -2432,19 +2473,26 @@ def _run_download(video_url: str, karaoke_url: str, progress=None) -> dict:
         "video_audio_filename": original_name,
         "preview_is_audio_only": preview_is_audio_only,
     }
-    if karaoke_name:
-        response["karaoke_filename"] = karaoke_name
-        response.update(
-            _extract(
-                original_name,
-                karaoke_name,
-                1.0,
-                progress,
-                preview_name if not preview_is_audio_only else None,
-            )
+    response["karaoke_filename"] = karaoke_name
+    response.update(
+        _extract(
+            original_name,
+            karaoke_name,
+            1.0,
+            progress,
+            preview_name if not preview_is_audio_only else None,
         )
+    )
     report(99, "結果を表示する準備をしています")
     return response
+
+
+def _run_download(video_url: str, karaoke_url: str, progress=None) -> dict:
+    return _run_sources(
+        video_url=video_url,
+        karaoke_url=karaoke_url,
+        progress=progress,
+    )
 
 
 def _download_worker(job_id: str, video_url: str, karaoke_url: str) -> None:
@@ -2472,10 +2520,52 @@ def _download_worker(job_id: str, video_url: str, karaoke_url: str) -> None:
         _release_processing_slot()
 
 
+def _mixed_worker(job_id: str, payload: dict[str, object]) -> None:
+    def progress(value: int, message: str) -> None:
+        _update_job(job_id, progress=value, message=message)
+
+    uploaded_names = [
+        str(payload[key])
+        for key in ("video_name", "karaoke_name")
+        if payload.get(key)
+    ]
+    try:
+        result = _run_sources(
+            video_name=str(payload.get("video_name") or "") or None,
+            video_url=str(payload.get("video_url") or ""),
+            karaoke_name=str(payload.get("karaoke_name") or "") or None,
+            karaoke_url=str(payload.get("karaoke_url") or ""),
+            preview_is_audio_only=bool(payload.get("preview_is_audio_only", True)),
+            progress=progress,
+        )
+        _update_job(
+            job_id,
+            status="complete",
+            progress=100,
+            message="抽出が完了しました",
+            result=result,
+        )
+    except Exception as error:
+        app.logger.exception("background mixed-source processing failed job_id=%s", job_id)
+        for name in uploaded_names:
+            try:
+                _media_path(name).unlink(missing_ok=True)
+            except (ValueError, FileNotFoundError):
+                pass
+        _update_job(
+            job_id,
+            status="error",
+            message=_public_error_message(error),
+            error=_public_error_message(error),
+        )
+    finally:
+        _release_processing_slot()
+
+
 def _download_queue_loop() -> None:
-    """待機中のURL処理を、メモリを重ねず必ず1件ずつ実行する。"""
+    """待機中の取得・抽出処理を、メモリを重ねず必ず1件ずつ実行する。"""
     while True:
-        job_id, video_url, karaoke_url = JOB_QUEUE.get()
+        job_id, job_kind, payload = JOB_QUEUE.get()
         _refresh_queue_positions()
         acquired = False
         try:
@@ -2487,8 +2577,17 @@ def _download_queue_loop() -> None:
                 queue_position=None,
                 message="処理を準備しています",
             )
-            _download_worker(job_id, video_url, karaoke_url)
-            acquired = False  # _download_workerがスロットを解放する。
+            if job_kind == "url":
+                _download_worker(
+                    job_id,
+                    str(payload.get("video_url") or ""),
+                    str(payload.get("karaoke_url") or ""),
+                )
+            elif job_kind == "mixed":
+                _mixed_worker(job_id, payload)
+            else:
+                raise ValueError("不明な処理種別です。")
+            acquired = False  # 各workerがスロットを解放する。
         except Exception as error:
             if acquired:
                 _release_processing_slot()
@@ -2541,7 +2640,13 @@ def download_start():
             "updated_at": time.time(),
         }
     try:
-        JOB_QUEUE.put_nowait((job_id, video_url, karaoke_url))
+        JOB_QUEUE.put_nowait(
+            (
+                job_id,
+                "url",
+                {"video_url": video_url, "karaoke_url": karaoke_url},
+            )
+        )
         _refresh_queue_positions()
     except queue.Full:
         with JOBS_LOCK:
@@ -2550,6 +2655,97 @@ def download_start():
         response.status_code = 503
         response.headers["Retry-After"] = "30"
         return response
+    snapshot = _job_snapshot(job_id) or {}
+    return jsonify(job_id=job_id, queue_position=snapshot.get("queue_position", 1)), 202
+
+
+@app.post("/mixed/start")
+def mixed_start():
+    """各素材を、アップロードかYouTube URLのどちらかで受け付ける。"""
+    video = request.files.get("video")
+    karaoke = request.files.get("karaoke")
+    video_url = str(request.form.get("video_url", "")).strip()
+    karaoke_url = str(request.form.get("kara_url", "")).strip()
+    has_video_file = bool(video and video.filename)
+    has_karaoke_file = bool(karaoke and karaoke.filename)
+
+    if has_video_file == bool(video_url):
+        return jsonify(error="ステージ音源はファイルかYouTube URLのどちらか一方を指定してください。"), 400
+    if has_karaoke_file == bool(karaoke_url):
+        return jsonify(error="MV・公式音源はファイルかYouTube URLのどちらか一方を指定してください。"), 400
+    try:
+        if video_url:
+            video_url = _validate_youtube_url(video_url)
+        if karaoke_url:
+            karaoke_url = _validate_youtube_url(karaoke_url)
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    if JOB_QUEUE.full():
+        response = jsonify(error="処理待ちが上限に達しています。少し待ってからお試しください。")
+        response.status_code = 503
+        response.headers["Retry-After"] = "30"
+        return response
+    rejection = _rate_limit_rejection()
+    if rejection is not None:
+        return rejection
+
+    saved_paths: list[Path] = []
+    try:
+        video_name = None
+        karaoke_name = None
+        preview_is_audio_only = True
+        if has_video_file and video:
+            preview_is_audio_only = not (video.mimetype or "").startswith("video/")
+            video_name = _unique_name(video.filename)
+            video_path = MEDIA_DIR / video_name
+            video.save(video_path)
+            saved_paths.append(video_path)
+            _validate_media_duration(video_path)
+        if has_karaoke_file and karaoke:
+            karaoke_name = _unique_name(karaoke.filename)
+            karaoke_path = MEDIA_DIR / karaoke_name
+            karaoke.save(karaoke_path)
+            saved_paths.append(karaoke_path)
+            _validate_media_duration(karaoke_path)
+
+        job_id = uuid.uuid4().hex
+        with JOBS_LOCK:
+            if len(JOBS) >= 40:
+                completed = [key for key, job in JOBS.items() if job.get("status") != "working"]
+                for key in completed[:20]:
+                    JOBS.pop(key, None)
+            JOBS[job_id] = {
+                "status": "queued",
+                "progress": 1,
+                "queue_position": JOB_QUEUE.qsize() + 1,
+                "message": "処理待ちに追加しました",
+                "updated_at": time.time(),
+            }
+        job_payload: dict[str, object] = {
+            "video_name": video_name or "",
+            "video_url": video_url,
+            "karaoke_name": karaoke_name or "",
+            "karaoke_url": karaoke_url,
+            "preview_is_audio_only": preview_is_audio_only,
+        }
+        try:
+            JOB_QUEUE.put_nowait((job_id, "mixed", job_payload))
+            _refresh_queue_positions()
+        except queue.Full:
+            with JOBS_LOCK:
+                JOBS.pop(job_id, None)
+            raise RuntimeError("処理待ちが上限に達しています。少し待ってからお試しください。")
+    except Exception as error:
+        for path in saved_paths:
+            path.unlink(missing_ok=True)
+        response = jsonify(error=_public_error_message(error))
+        if "処理待ち" in str(error):
+            response.status_code = 503
+            response.headers["Retry-After"] = "30"
+        else:
+            response.status_code = 400
+        return response
+
     snapshot = _job_snapshot(job_id) or {}
     return jsonify(job_id=job_id, queue_position=snapshot.get("queue_position", 1)), 202
 

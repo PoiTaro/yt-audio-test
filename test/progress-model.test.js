@@ -30,3 +30,16 @@ test('the page loads the progress model first and scrolls only after successful 
   assert.match(app, /playerArea\.scrollIntoView\(/);
   assert.match(app, /if \(success\) \{\s*finishProgress\('再生の準備ができました'\);\s*scrollToResults\(\);/);
 });
+
+test('saved-file mode supports a YouTube source on either side', async () => {
+  const [html, app] = await Promise.all([
+    readFile(new URL('../mr-backend/templates/index.html', import.meta.url), 'utf8'),
+    readFile(new URL('../mr-backend/static/app.js', import.meta.url), 'utf8'),
+  ]);
+  assert.match(html, /id="videoFileUrlInput"/);
+  assert.match(html, /id="karaFileUrlInput"/);
+  assert.equal((html.match(/data-source-mode="url"/g) || []).length, 2);
+  assert.match(app, /fetch\(apiUrl\('\/mixed\/start'\)/);
+  assert.match(app, /form\.append\('video_url', videoUrl\)/);
+  assert.match(app, /form\.append\('kara_url', karaokeUrl\)/);
+});

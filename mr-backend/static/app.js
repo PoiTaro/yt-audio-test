@@ -29,6 +29,8 @@ const downloadSubmit = document.getElementById('downloadSubmit');
 const resultNote = document.getElementById('resultNote');
 const videoUrlInput = document.getElementById('videoUrlInput');
 const karaokeUrlInput = document.getElementById('karaUrlInput');
+const videoFileUrlInput = document.getElementById('videoFileUrlInput');
+const karaokeFileUrlInput = document.getElementById('karaFileUrlInput');
 const videoModeBtn = document.getElementById('videoModeBtn');
 const audioModeBtn = document.getElementById('audioModeBtn');
 const videoPreviewPanel = document.getElementById('videoPreviewPanel');
@@ -240,7 +242,7 @@ function startBackendWarmup() {
   warmBackend(true).catch((error) => console.warn('Backend warmup failed:', error));
 }
 
-[videoUrlInput, karaokeUrlInput].forEach((input) => {
+[videoUrlInput, karaokeUrlInput, videoFileUrlInput, karaokeFileUrlInput].forEach((input) => {
   input.addEventListener('focus', startBackendWarmup, { once: true });
   input.addEventListener('input', startBackendWarmup, { once: true });
   input.addEventListener('paste', startBackendWarmup, { once: true });
@@ -541,6 +543,37 @@ document.querySelectorAll('[data-paste-target]').forEach((button) => {
 document.getElementById('videoInput').addEventListener('change', () => updateFileName('videoInput', 'videoFileName'));
 document.getElementById('karaInput').addEventListener('change', () => updateFileName('karaInput', 'karaFileName'));
 
+document.querySelectorAll('[data-source-row]').forEach((row) => {
+  const buttons = [...row.querySelectorAll('[data-source-mode]')];
+  const panels = [...row.querySelectorAll('[data-source-panel]')];
+  const selectMode = (mode) => {
+    buttons.forEach((button) => {
+      const active = button.dataset.sourceMode === mode;
+      button.classList.toggle('is-active', active);
+      button.setAttribute('aria-pressed', String(active));
+    });
+    panels.forEach((panel) => {
+      const active = panel.dataset.sourcePanel === mode;
+      panel.classList.toggle('hidden', !active);
+      panel.querySelectorAll('input').forEach((input) => { input.disabled = !active; });
+    });
+  };
+  buttons.forEach((button) => {
+    button.addEventListener('click', () => {
+      selectMode(button.dataset.sourceMode);
+      const activeInput = row.querySelector(`[data-source-panel="${button.dataset.sourceMode}"] input`);
+      activeInput?.focus();
+      if (button.dataset.sourceMode === 'url') startBackendWarmup();
+    });
+  });
+  selectMode(row.querySelector('[data-source-mode].is-active')?.dataset.sourceMode || 'file');
+});
+
+function selectedSourceMode(sourceName) {
+  return document.querySelector(`[data-source-row="${sourceName}"] [data-source-mode].is-active`)
+    ?.dataset.sourceMode || 'file';
+}
+
 async function readJson(response) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok && !payload.error) payload.error = `サーバーエラー (${response.status})`;
@@ -550,39 +583,63 @@ async function readJson(response) {
 uploadForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   cancelResultAutoScroll();
+  const videoMode = selectedSourceMode('video');
+  const karaokeMode = selectedSourceMode('karaoke');
   const videoFile = document.getElementById('videoInput').files[0];
   const karaokeFile = document.getElementById('karaInput').files[0];
-  if (!videoFile) {
+  const videoUrl = videoFileUrlInput.value.trim();
+  const karaokeUrl = karaokeFileUrlInput.value.trim();
+  if (videoMode === 'file' && !videoFile) {
     log('まず歌声入りのステージ映像・音源を選択してください。', 'error');
     document.getElementById('videoInput').focus();
     return;
   }
-  const form = new FormData();
-  form.append('video', videoFile);
-  if (!karaokeFile) {
+  if (videoMode === 'url' && !videoUrl) {
+    log('歌声入りステージ動画のYouTube URLを入力してください。', 'error');
+    videoFileUrlInput.focus();
+    return;
+  }
+  if (karaokeMode === 'file' && !karaokeFile) {
     log('差分を抽出するには、比較用のMV・公式音源も選択してください。', 'error');
     document.getElementById('karaInput').focus();
     return;
   }
-  form.append('karaoke', karaokeFile);
-  setBusy(extractSubmit, true, '生歌の差分を抽出しています…');
-  setProgress(0, 'ファイルを送り、位置合わせしています', true);
-  log('ステージ映像と比較用音源を位置合わせして、生歌の差分を抽出しています。', 'working');
+  if (karaokeMode === 'url' && !karaokeUrl) {
+    log('比較用のMV・公式音源のYouTube URLを入力してください。', 'error');
+    karaokeFileUrlInput.focus();
+    return;
+  }
+
+  const form = new FormData();
+  if (videoMode === 'file') form.append('video', videoFile);
+  else form.append('video_url', videoUrl);
+  if (karaokeMode === 'file') form.append('karaoke', karaokeFile);
+  else form.append('kara_url', karaokeUrl);
+  setBusy(extractSubmit, true, '処理しています…');
+  const smoothProgress = startSmoothProgress(2, '素材を送り、処理を準備しています');
+  log('2つの素材を準備して位置を合わせ、生歌の差分を抽出しています。', 'working');
   try {
-    await warmBackend(true);
-    setProgress(2, 'ファイルを送り、位置合わせしています', true);
-    const response = await fetch(apiUrl('/upload'), { method: 'POST', body: form });
-    const success = await handleServerResponse(await readJson(response));
+    await warmBackend(false);
+    smoothProgress.update(2, '素材を送り、処理を準備しています');
+    const response = await fetch(apiUrl('/mixed/start'), { method: 'POST', body: form });
+    const started = await readJson(response);
+    if (started.error) throw new Error(started.error);
+    const result = await waitForDownloadJob(started.job_id, smoothProgress);
+    smoothProgress.update(98, '抽出結果を読み込んでいます');
+    const success = await handleServerResponse(result);
+    smoothProgress.stop();
     if (success) {
-      finishProgress('抽出が完了しました');
+      finishProgress('再生の準備ができました');
       scrollToResults();
     }
     else failProgress(status.textContent);
   } catch (error) {
+    smoothProgress.stop();
     console.error(error);
-    log(`アップロードまたは処理に失敗しました: ${error.message}`, 'error');
-    failProgress('処理に失敗しました');
+    log(`素材の取得または処理に失敗しました: ${error.message}`, 'error');
+    failProgress('取得または処理に失敗しました');
   } finally {
+    smoothProgress.stop();
     setBusy(extractSubmit, false);
   }
 });
