@@ -402,6 +402,30 @@ def _validate_media_duration(path: Path) -> float:
     return duration
 
 
+def _media_has_video_stream(path: Path) -> bool:
+    """申告されたMIMEではなく、実ファイル内の通常映像ストリームを確認する。"""
+    if not FFPROBE_PATH:
+        raise RuntimeError("動画を確認するFFprobeが見つかりません。")
+    result = subprocess.run(
+        [
+            FFPROBE_PATH,
+            "-v",
+            "error",
+            "-select_streams",
+            "V:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    return result.returncode == 0 and "video" in result.stdout.split()
+
+
 def _public_error_message(error: Exception) -> str:
     if isinstance(error, (ValueError, FileNotFoundError)):
         return str(error)[:300]
@@ -2340,12 +2364,12 @@ def upload():
         return rejection
     saved_paths: list[Path] = []
     try:
-        preview_is_audio_only = not (video.mimetype or "").startswith("video/")
         video_name = _unique_name(video.filename)
         video_path = MEDIA_DIR / video_name
         video.save(video_path)
         saved_paths.append(video_path)
         _validate_media_duration(video_path)
+        preview_is_audio_only = not _media_has_video_stream(video_path)
         original_name = video_name
         if not preview_is_audio_only:
             original_name = _extract_uploaded_video_audio(video_name)
@@ -2753,12 +2777,12 @@ def mixed_start():
         karaoke_name = None
         preview_is_audio_only = True
         if has_video_file and video:
-            preview_is_audio_only = not (video.mimetype or "").startswith("video/")
             video_name = _unique_name(video.filename)
             video_path = MEDIA_DIR / video_name
             video.save(video_path)
             saved_paths.append(video_path)
             _validate_media_duration(video_path)
+            preview_is_audio_only = not _media_has_video_stream(video_path)
         if has_karaoke_file and karaoke:
             karaoke_name = _unique_name(karaoke.filename)
             karaoke_path = MEDIA_DIR / karaoke_name
