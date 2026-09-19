@@ -38,8 +38,11 @@ class SecurityBoundaryTests(unittest.TestCase):
         self.assertNotIn('data-admax-id=', html)
         self.assertIn('c353bd1916008a19171a147b0897bad5', loader)
         self.assertIn('fbd3a0fdfddc2a55a376d0425236dccb', loader)
+        self.assertIn('eef4b35464b745088a51572fd8ff1991', loader)
+        self.assertIn('1c5183ee57000dec81e78da690573a90', loader)
         self.assertIn("matchMedia('(max-width: 900px)')", loader)
         self.assertIn('delete window.admaxoverlay', loader)
+        self.assertIn("action: 'interstitial'", loader)
         self.assertIn('https://adm.shinobi.jp/st/s.js', loader)
 
     def test_privacy_policy_discloses_ad_storage_and_data_sharing(self):
