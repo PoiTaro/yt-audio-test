@@ -77,6 +77,7 @@ let storedEnhancedVideoUrl = null;
 let storedNaturalVideoUrl = null;
 let extractionStrength = 1.0;
 let progressHideTimer = null;
+let resultScrollTimer = null;
 let audioSyncFrame = null;
 let videoSyncFrame = null;
 let vocalStartContextTime = 0;
@@ -134,6 +135,69 @@ function failProgress(message) {
   progressBar.style.width = '100%';
 }
 
+function startSmoothProgress(initialValue, initialMessage) {
+  const model = globalThis.MRRemovalProgress;
+  if (!model) {
+    setProgress(initialValue, initialMessage);
+    return {
+      update: (value, message) => setProgress(value, message),
+      stop: () => {},
+    };
+  }
+
+  const startedAt = performance.now();
+  let lastFrameAt = startedAt;
+  let displayedValue = Math.max(0, Number(initialValue) || 0);
+  let reportedValue = displayedValue;
+  let currentMessage = initialMessage;
+  let stopped = false;
+
+  const render = () => {
+    if (stopped) return;
+    const now = performance.now();
+    const estimatedValue = model.estimateProgress(now - startedAt);
+    const targetValue = Math.max(reportedValue, estimatedValue);
+    displayedValue = model.advanceProgress(displayedValue, targetValue, now - lastFrameAt);
+    lastFrameAt = now;
+    setProgress(displayedValue, currentMessage);
+  };
+
+  setProgress(displayedValue, currentMessage);
+  const timer = window.setInterval(render, 200);
+  return {
+    update(value, message) {
+      reportedValue = Math.max(reportedValue, Math.min(model.WAITING_CEILING_PERCENT, Number(value) || 0));
+      if (message) currentMessage = message;
+      render();
+    },
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      window.clearInterval(timer);
+    },
+  };
+}
+
+function cancelResultAutoScroll() {
+  if (!resultScrollTimer) return;
+  window.clearTimeout(resultScrollTimer);
+  resultScrollTimer = null;
+}
+
+function scrollToResults() {
+  cancelResultAutoScroll();
+  if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+  resultScrollTimer = window.setTimeout(() => {
+    resultScrollTimer = null;
+    if (playerArea.classList.contains('hidden')) return;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    playerArea.scrollIntoView({
+      behavior: reducedMotion ? 'auto' : 'smooth',
+      block: 'start',
+    });
+  }, 240);
+}
+
 async function warmBackend(showStatus = true) {
   if (backendReady) return true;
   if (backendWarmPromise) return backendWarmPromise;
@@ -182,16 +246,18 @@ function startBackendWarmup() {
   input.addEventListener('paste', startBackendWarmup, { once: true });
 });
 
-async function waitForDownloadJob(jobId) {
+async function waitForDownloadJob(jobId, progressController = null) {
   while (true) {
     const response = await fetch(apiUrl(`/jobs/${encodeURIComponent(jobId)}`), { cache: 'no-store' });
     const job = await readJson(response);
     if (job.error && job.status !== 'error') throw new Error(job.error);
     if (job.status === 'complete') {
-      setProgress(97, '抽出結果を受け取っています');
+      if (progressController) progressController.update(97, '抽出結果を受け取っています');
+      else setProgress(97, '抽出結果を受け取っています');
       return job.result;
     }
-    setProgress(job.progress || 0, job.message || '処理しています');
+    if (progressController) progressController.update(job.progress || 0, job.message || '処理しています');
+    else setProgress(job.progress || 0, job.message || '処理しています');
     if (job.status === 'error') throw new Error(job.error || job.message || '処理に失敗しました。');
     await new Promise((resolve) => setTimeout(resolve, 650));
   }
@@ -483,6 +549,7 @@ async function readJson(response) {
 
 uploadForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  cancelResultAutoScroll();
   const videoFile = document.getElementById('videoInput').files[0];
   const karaokeFile = document.getElementById('karaInput').files[0];
   if (!videoFile) {
@@ -506,7 +573,10 @@ uploadForm.addEventListener('submit', async (event) => {
     setProgress(2, 'ファイルを送り、位置合わせしています', true);
     const response = await fetch(apiUrl('/upload'), { method: 'POST', body: form });
     const success = await handleServerResponse(await readJson(response));
-    if (success) finishProgress('抽出が完了しました');
+    if (success) {
+      finishProgress('抽出が完了しました');
+      scrollToResults();
+    }
     else failProgress(status.textContent);
   } catch (error) {
     console.error(error);
@@ -519,6 +589,7 @@ uploadForm.addEventListener('submit', async (event) => {
 
 downloadForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  cancelResultAutoScroll();
   const videoUrl = videoUrlInput.value.trim();
   const karaokeUrl = karaokeUrlInput.value.trim();
   if (!videoUrl) {
@@ -532,11 +603,11 @@ downloadForm.addEventListener('submit', async (event) => {
     return;
   }
   setBusy(downloadSubmit, true, '取得しています…');
-  setProgress(2, '処理を準備しています');
+  const smoothProgress = startSmoothProgress(2, '処理を準備しています');
   log('ステージ動画と比較用音源を取得して、位置を合わせています。しばらくお待ちください。', 'working');
   try {
-    await warmBackend(true);
-    setProgress(2, '処理を準備しています');
+    await warmBackend(false);
+    smoothProgress.update(2, '処理を準備しています');
     const response = await fetch(apiUrl('/download/start'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -544,16 +615,21 @@ downloadForm.addEventListener('submit', async (event) => {
     });
     const started = await readJson(response);
     if (started.error) throw new Error(started.error);
-    const result = await waitForDownloadJob(started.job_id);
-    setProgress(99, '抽出結果を読み込んでいます');
+    const result = await waitForDownloadJob(started.job_id, smoothProgress);
+    smoothProgress.update(98, '抽出結果を読み込んでいます');
     const success = await handleServerResponse(result);
-    if (success) finishProgress('再生の準備ができました');
-    else failProgress(status.textContent);
+    smoothProgress.stop();
+    if (success) {
+      finishProgress('再生の準備ができました');
+      scrollToResults();
+    } else failProgress(status.textContent);
   } catch (error) {
+    smoothProgress.stop();
     console.error(error);
     log(`取得または処理に失敗しました: ${error.message}`, 'error');
     failProgress('取得または処理に失敗しました');
   } finally {
+    smoothProgress.stop();
     setBusy(downloadSubmit, false);
   }
 });
