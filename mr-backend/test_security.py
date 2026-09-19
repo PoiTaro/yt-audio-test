@@ -319,8 +319,10 @@ class SecurityBoundaryTests(unittest.TestCase):
                 capture_output=True,
                 timeout=30,
             )
+            self.assertTrue(backend._media_has_video_stream(video_path))
             audio_name = backend._extract_uploaded_video_audio(video_name)
             audio_path = backend.MEDIA_DIR / audio_name
+            self.assertFalse(backend._media_has_video_stream(audio_path))
             probe = subprocess.run(
                 [
                     backend.FFPROBE_PATH,
