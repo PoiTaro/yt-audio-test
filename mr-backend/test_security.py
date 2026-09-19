@@ -17,11 +17,39 @@ class SecurityBoundaryTests(unittest.TestCase):
     def test_security_headers_are_present(self):
         response = self.client.get("/", base_url="https://example.test")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("default-src 'self'", response.headers["Content-Security-Policy"])
+        content_security_policy = response.headers["Content-Security-Policy"]
+        self.assertIn("default-src 'self'", content_security_policy)
+        self.assertIn("script-src 'self' https://adm.shinobi.jp", content_security_policy)
+        self.assertIn("frame-src https:", content_security_policy)
+        self.assertNotIn("'unsafe-eval'", content_security_policy)
         self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
         self.assertEqual(response.headers["X-Frame-Options"], "DENY")
         self.assertEqual(response.headers["Cross-Origin-Opener-Policy"], "same-origin")
         self.assertIn("max-age=31536000", response.headers["Strict-Transport-Security"])
+
+    def test_fixed_responsive_ad_slots_do_not_enable_automatic_ads(self):
+        response = self.client.get("/")
+        html = response.get_data(as_text=True)
+        loader = (backend.BASE_DIR / "static" / "ad-loader.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="adSlot"', html)
+        self.assertIn('/static/ad-loader.js', html)
+        self.assertNotIn('adm.shinobi.jp/st/auto.js', html)
+        self.assertNotIn('data-admax-id=', html)
+        self.assertIn('c353bd1916008a19171a147b0897bad5', loader)
+        self.assertIn('fbd3a0fdfddc2a55a376d0425236dccb', loader)
+        self.assertIn("matchMedia('(max-width: 900px)')", loader)
+        self.assertIn('delete window.admaxoverlay', loader)
+        self.assertIn('https://adm.shinobi.jp/st/s.js', loader)
+
+    def test_privacy_policy_discloses_ad_storage_and_data_sharing(self):
+        response = self.client.get("/")
+        html = response.get_data(as_text=True)
+
+        self.assertIn("忍者AdMaxによる広告", html)
+        self.assertIn("CookieやlocalStorage", html)
+        self.assertIn("広告配信パートナーへ送信", html)
+        self.assertNotIn("広告配信を目的とするCookieを使用していません", html)
 
     def test_untrusted_browser_origin_cannot_start_processing(self):
         response = self.client.post(

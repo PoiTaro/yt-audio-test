@@ -168,9 +168,11 @@ def _add_frontend_cors_headers(response):
         )
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
-        "form-action 'self'; script-src 'self'; style-src 'self'; "
-        "img-src 'self' data: https://i.ytimg.com; media-src 'self' blob:; "
-        "connect-src 'self' " + " ".join(sorted(FRONTEND_ORIGINS))
+        "form-action 'self'; script-src 'self' https://adm.shinobi.jp "
+        "https://cnobi.jp https://dmp.im-apps.net; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; media-src 'self' blob:; frame-src https:; "
+        "connect-src 'self' https://adm.shinobi.jp https://cnobi.jp "
+        "https://dmp.im-apps.net " + " ".join(sorted(FRONTEND_ORIGINS))
     ).strip()
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
